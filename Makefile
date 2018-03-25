@@ -44,11 +44,14 @@ OBJS := ${GDIR}/GBase.o ${GDIR}/GStr.o ${GDIR}/GArgs.o ${GDIR}/gdna.o ./GapAssem
 #endif
 
 .PHONY : all debug release
-all:    pwasm pwaor
-#debug:  all
+all: paf2msa
+#all:    pwasm pwaor
 debug : all
 release : all
-#all : bamcons
+
+paf2msa :  ./paf2msa.o ./GapAssem.o ${OBJS}
+	${LINKER} -o $@ ${filter-out %.a %.so, $^} $(LDFLAGS) ${LIBS}
+
 bamcons :  ./bamcons.o ${GDIR}/GFastaIndex.o ${GDIR}/GFaSeqGet.o ${GDIR}/GBam.o ${OBJS} 
 	${LINKER} $(LDFLAGS) -o $@ ${filter-out %.a %.so, $^} -L${SAM} ${LIBS} -lbam
 
@@ -63,7 +66,6 @@ tclust:  ./tclust.o ${GDIR}/GBase.o ${GDIR}/GStr.o ${GDIR}/GArgs.o
 
 sclust:  ./sclust.o ${GDIR}/GBase.o ${GDIR}/GStr.o ${GDIR}/GArgs.o
 	${LINKER} $(LDFLAGS) -o $@ ${filter-out %.a %.so, $^}
-
 
 ./GapAssem.o: GapAssem.h
 
