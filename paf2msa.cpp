@@ -7,59 +7,106 @@
 #include "GList.hh"
 #include "GapAssem.h"
 #define USAGE "Usage:\n\
- pfa2msa <pfa_with_cg_cs> -d <refseq.fa>\n\
+ pfa2msa <pfa_with_cg_cs> -r <refseq.fa>\n\
     [-o <outfile_maf>]\n\
     \n\
-   <pfa_with_cg_cs> is the input PAF file where a single refseq was aligned\n\
-      to other (larger) sequences using minimap2 --cs -P\n\
-   -d a fasta file with the refseq sequence (required)\n\
-   -o write output to file <outfile_maf> instead of stdout\n\
+   <pfa_with_cg_cs> is the input PAF file where a single query was aligned\n\
+      to many (larger) target sequences using minimap2 --cs -P\n\
+   -r a fasta file with the query sequence to use as reference (required)\n\
+   -o write output to file <outfile_maf> instead of stdout\n"
 
-#define LOG_MSG_CLIPMAX "Overlap between %s and reference %s rejected due to clipmax=%4.2f constraint.\n"
+#define LOG_MSG_CLIPMAX "Overlap between %s and target %s rejected due to clipmax=%4.2f constraint.\n"
 #define LOG_MSG_OVLCLIP "Overlap between %s and %s invalidated by the %dnt clipping of %s at %d' end.\n"
-//-------- global variables 
+//-------- global variables
 bool debugMode=false;
 bool removeConsGaps=false;
-char* ref_prefix=NULL;
+//char* ref_prefix=NULL;
 bool verbose=false;
-int rlineno=0;
+//int rlineno=0;
 
-FILE* refseq; //input refseq FASTA
-FILE* outf;
+FILE* outf=NULL;
+
 GHash<GASeq> seqs(false);
+
+//list of collected MSAs
 GList<GSeqAlign> alns(true, true,false);
                  // sorted, free element, not unique
 
-void loadAlnSeqs(GSeqAlign* aln);
-void printDebugAln(FILE* f, GSeqAlign* aln, int num);
-
-// flag for reference status:
-const unsigned char flag_IS_REF=0;
-
-//this is only for tree/transitive embedding:
-const unsigned char flag_HAS_PARENT=1;
+void printDebugAln(FILE* f, GList<GSeqAlign>& aa, int a);
 
 float clipmax=0;
 //--------------------------------
-class RefAlign {
-  char* linecpy;
-  int lineno; //input file line#
+struct GapData {
+	int pos; //position of gap on sequence
+	int len; //length of gap (0 means 1)
+	GapData(int p=0, int l=1):pos(p),len(l) { }
+};
+
+struct AlnInfo {
+  char reverse;
+  const char* r_id;
+  int r_len;
+  int r_alnstart;
+  int r_alnend;
+  const char* t_id;
+  int t_len; //raw length directly from the PAF field
+  int t_alnstart;
+  int t_alnend;
+  AlnInfo():reverse(2), r_id(NULL), r_len(0), r_alnstart(0), r_alnend(0),
+		  t_id(NULL), t_len(0), t_alnstart(0), t_alnend(0) {}
+  AlnInfo(char strand, const char* rid, const char* rlen, const char* rstart, const char* rend,
+		  const char* tid, const char* tlen, const char* tstart, const char* tend):r_id(rid), t_id(tid) {
+	reverse = (strand=='-') ? 1 : 0;
+	r_len = atoi(rlen);
+	r_alnstart=atoi(rstart);
+	r_alnend=atoi(rend);
+	t_len = atoi(tlen);
+	t_alnstart=atoi(tstart);
+	t_alnend=atoi(tend);
+  }
+  void set(char strand, const char* rid, const char* rlen, const char* rstart, const char* rend,
+		  const char* tid, const char* tlen, const char* tstart, const char* tend) {
+	r_id=rid;
+	t_id=tid;
+	reverse = (strand=='-') ? 1 : 0;
+	r_len = atoi(rlen);
+	r_alnstart=atoi(rstart);
+	r_alnend=atoi(rend);
+	t_len = atoi(tlen);
+	t_alnstart=atoi(tstart);
+	t_alnend=atoi(tend);
+  }
+};
+
+class PAFAlignment {
+  //char* linecpy;
+  //int lineno; //input file line#
+	/*
   char* gpos;
   char* gpos_onref;
   char* gaps;//char string with gaps in this read
   char* gaps_onref;//char string with gaps in reference
+  */
  public:
-  char* seqname; //aligned read
-  int seqlen; //length of this read
-  int offset; //offset of this read relative to reference
-  int clip5;
-  int clip3;
-  char reverse; //is this reverse complemented?
-  void parseErr(int fldno);
-  RefAlign(char* line, int len, int lno);
-  ~RefAlign();
-  int nextRefGap(int& pos);
-  int nextSeqGap(int& pos);
+  AlnInfo alninfo;
+  GVec<GapData> rgaps; //reference query gaps
+  GVec<GapData> tgaps; //target gaps
+  char* seqname; //aligned target sequence (read, or genome mapping)
+  char* cs; //cs tag value = difference string (short)
+  int nm; //number of 1bp edits (edit distance)
+  char* cigar;
+
+  int seqlen; //length of this tseq (target sequence, unedited)
+  int offset; //offset of this mapping relative to reference
+  int clip5; //amount to clip on the left end (0 for PAF on tseq)
+  int clip3; //amount to clip on the right end (0 for PAF on tseq)
+  char reverse; //0, or 1 if this mapping is reverse complemented
+  void parseErr(int fldno, const char* line);
+  PAFAlignment(GDynArray<char*>& t, AlnInfo& alni, GASeq& refseq, GStr& tseq, const char* line);
+   //this also rebuilds tseq with the target sequence, by transforming refseq according to cs string
+  ~PAFAlignment() { GFREE(seqname); GFREE(cs); GFREE(cigar); }
+  //int nextRefGap(int& pos);
+  //int nextSeqGap(int& pos);
  };
 
 //returns the end of a space delimited token
@@ -70,7 +117,7 @@ char* endSpToken(char* str) {
  if (str==NULL || *str==0) return NULL;
  char* p=str;
  for (;*p!=0;p++)
-  if (*p==' ' || *p=='\t' || *p=='\n') return p;   
+  if (*p==' ' || *p=='\t' || *p=='\n') return p;
  return p; // *p is '\0'
 }
 
@@ -91,9 +138,8 @@ int main(int argc, char * const argv[]) {
  MSAColumns::removeConsGaps=removeConsGaps;
  GStr infile;
  if (args.startNonOpt()) {
-        infile=args.nextNonOpt();
-        //GMessage("Given file: %s\n",infile.chars());
-        }
+   infile=args.nextNonOpt();
+ }
  //==
  FILE* inf;
  if (!infile.is_empty()) {
@@ -127,7 +173,6 @@ int main(int argc, char * const argv[]) {
           }
 
       } //clipmax option
-  ref_prefix=args.getOpt('p');
   GStr outfile=args.getOpt('o');
   if (!outfile.is_empty()) {
      outf=fopen(outfile, "w");
@@ -136,157 +181,129 @@ int main(int argc, char * const argv[]) {
      }
    else outf=stdout;
   //************************************************
-
-
-  GStr dbidx=args.getOpt('d');
-  if (dbidx.is_empty())
-    GError("%sError: a cdb index of a fasta file must be provided!\n",USAGE);
-  GCdbYank* cdbyank=new GCdbYank(dbidx.chars());
-  GCdbYank* refcdb = NULL;
-  dbidx=args.getOpt('r');
-  if (!dbidx.is_empty())
-    refcdb=new GCdbYank(dbidx.chars());
-
+  s=args.getOpt('r');
+  if (s.is_empty()) GError("Error: query sequence file (-r) is required!\n");
+  GFastaFile rfa(s.chars());
+  FastaSeq faseq;
+  FastaSeq* r=rfa.getFastaSeq(&faseq);
+  if (r==NULL || faseq.getSeqLen()==0)
+	  GError("Error loading FASTA sequence from file %s !\n",s.chars());
+  GASeq *refseq=new GASeq(faseq, true); //take over faseq data
+  refseq->lowercase();
+  GASeq refseq_rc(*refseq);
+  refseq_rc.reverseComplement();
   GLineReader* linebuf=new GLineReader(inf);
   char* line;
   alns.setSorted(compareOrdnum);
-  GASeq* refseq=NULL; // current reference sequence
-  int ref_numseqs=0;
-  int ref_len=0;
-  int ref_lend=0, ref_rend=0;
-  int gaplen,gappos;
-  bool skipRefContig=false;
-  while ((line=linebuf->getLine())!=NULL) {
-   RefAlign* aln=NULL; 
-   if (line[0]=='>') {
-     //establish current reference
-     char* ref_name=&line[1];
-     char* p=endSpToken(ref_name);
-     if (p==NULL) GError("Error parsing reference sequence name at:\n%s\n",line);
-     if (ref_prefix!=NULL) {
-          if (startsWith(ref_name,ref_prefix)) {
-              skipRefContig=false;
-              }
-            else {
-              skipRefContig=true;
-              goto NEXT_LINE_NOCHANGE;
-              }         
-          }
-     *p=0;
-     if (seqs.Find(ref_name))
-        GError("Error (line %d): reference sequence %s is not unique in the input data\n",
-                             rlineno+1,ref_name);
-     p++;
-     if (!parseInt(p,ref_numseqs))
-           GError("Error parsing the number of components for reference sequence %s\n",ref_name);
-     if (!parseInt(p,ref_lend))
-           GError("Error parsing the left end of reference sequence %s\n",ref_name);
-     if (!parseInt(p,ref_rend))
-           GError("Error parsing the right end of reference sequence %s\n",ref_name);
-     ref_len=ref_rend;
-     refseq=new GASeq(ref_name, 0, ref_len,
-                       ref_lend-1, ref_len-ref_rend, 0);
-     refseq->setFlag(flag_IS_REF);
-     seqs.Add(ref_name,refseq);
-     //may be followed by actual nucleotide sequence of this reference
-     while (*p!=0 && *p!='\n') {
-       if (*p!='\t' && *p!=' ') refseq->extendSeq(*p);
-       p++;
-       }
-     if (refseq->len>0) {
-        refseq->endSeq();
-        if (refseq->len!=refseq->seqlen)
-          GError("Error: reference sequence %s length mismatch "
-                 "(declared %d, found %d)\n",
-                  refseq->id, refseq->seqlen, refseq->len);
-        }
-     goto NEXT_LINE_NOCHANGE;
-     } //reference line
-   //-- component/read line --
-   if (skipRefContig) goto NEXT_LINE_NOCHANGE;
-     else {
-   //else:
-   //-------------------------------------------
-   aln=new RefAlign(line, linebuf->tlength(), rlineno+1);
-   if (strcmp(aln->seqname, refseq->id)==0)
-     goto NEXT_LINE_NOCHANGE; //skip redundant inclusion of reference as its own child
-   if (seqs.Find(aln->seqname))
-      GError("Error (line %d): component sequence %s must be unique in the input data\n",
-                    rlineno+1,aln->seqname);
-   if (clipmax>0) {
-     //check if any of the clipping involved is larger than clipmax
-     int maxovh=(clipmax<1.00)?
-            iround(clipmax * (float)aln->seqlen) :
-            (int)clipmax;
-     if (aln->clip3>maxovh || aln->clip5>maxovh) {
-       if (verbose)
-         fprintf(stderr, LOG_MSG_CLIPMAX,
-                 aln->seqname, refseq->id, clipmax);
-       goto NEXT_LINE_NOCHANGE;
-       }// bad mismatching overhangs
-     }
-   GASeq* aseq=new GASeq(aln->seqname,aln->offset,aln->seqlen,
-                           aln->clip5,aln->clip3,aln->reverse);
-   GASeq* rseq;
-   if (refseq->msa==NULL) {
-     rseq=refseq;
-     }
-   else rseq=new GASeq(refseq->id,0,refseq->seqlen,
-                            refseq->clp5,refseq->clp3,0);
-   gappos=0;
-   while ((gaplen=aln->nextRefGap(gappos))>0)
-        rseq->setGap(gappos-1,gaplen);
-   gappos=0;
-   while ((gaplen=aln->nextSeqGap(gappos))>0)
-        aseq->setGap(gappos-1,gaplen);
-   //for mgblast alignment, only the query can be reversed
-   if (aseq->revcompl==1)
-         aseq->reverseGaps(); //don't update offset & reverse flags
+  refseq->setFlag(GA_FLAG_IS_REF);
+  seqs.Add(refseq->getId(),refseq);
 
-   GSeqAlign *newaln=new GSeqAlign(rseq, aseq);
-   if (rseq==refseq) {//first alignment with refseq
-     newaln->incOrd();
-     alns.Add(newaln);
-     goto NEXT_LINE;
-     }
-   refseq->msa->addAlign(refseq,newaln,rseq);
-   delete newaln;
-   seqs.Add(aseq->name(),aseq);
-   }// parsing new alignment
-   //---------------------
- NEXT_LINE:
-   /* debug print the progressive alignment */
+  int numalns=0;
+  GDynArray<char*> t(24);
+  while ((line=linebuf->getLine())!=NULL) {
+   if (line[0]=='#') continue;
+   bool firstRefAln=false;
+   GStr lstr(line);
+   int numt=strsplit(line, t, '\t');
+   if (numt<15)
+	   GError("Error: invalid PAF fline (num. fields=%d):\n%s\n", numt,lstr.chars());
+   if (strcmp(t[0], refseq->getId())!=0)
+	   GError("Error: expected reference name (%s) in PAF line, but found %s instead!\n",
+	    		  refseq->getId(),t[0]);
+   AlnInfo al(*t[4], t[0], t[1], t[2], t[3], t[5], t[6], t[7], t[8]);
+   if (strcmp(al.r_id, al.t_id)==0) {
+	  if (verbose) GMessage("Skipping alignment of qry seq to itself.\n");
+      continue; //skip redundant inclusion of reference as its own child
+   }
+
+   if (al.r_len!=refseq->getSeqLen())
+	    GError("Error: ref seq len in this PAF line (%d) differs from loaded sequence length(%d)!\n%s\n",
+		     al.r_len, refseq->getSeqLen(),lstr.chars());
+   if (seqs.Find(al.t_id)) {
+        GMessage("Warning: target sequence %s alignment already seen before, ignoring other alignments\n",
+                             al.t_id);
+        continue;
+   }
+   //-- load the current alignment
+   ++numalns;
+   GASeq *r_seq = refseq;
+   if (al.reverse) r_seq=&refseq_rc;
+
+   GStr tseq("",al.t_alnend-al.t_alnstart+2);
+   PAFAlignment* aln=new PAFAlignment(t, al, *r_seq, tseq, lstr.chars());
+   //this also fills tseq and sets aln->offset to the tseq mapping offset on refseq
+   GStr tlabel(al.t_id, 21);
+   tlabel+=":";tlabel+=al.t_alnstart;tlabel+='-';
+   tlabel+=al.t_alnend;
+   if (al.reverse) tlabel+='-';
+   else tlabel+='+';
+   //char* t_seq=Gstrdup(tseq.chars());
+   GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), aln->offset);
+   taseq->revcompl=aln->reverse;
+   GASeq* rseq=refseq; //only for the first ref alignment
+   if (refseq->msa!=NULL) { //already have a MSA
+     //need to merge this alignment into existing MSA refseq->msa
+	//rseq is just an instance of refseq in this alignment
+	 rseq=new GASeq(refseq->getId(), 0, al.r_len);
+			 // al.r_alnstart, al.r_len-al.r_alnend, 0);
+   }
+   else {
+	   firstRefAln=true;
+   }
+   //once a gap, always a gap
+   //propagate gaps in ref seq from the current alignment
+
+   for (int g=0;g<aln->rgaps.Count();++g) {
+	   GapData &gd=aln->rgaps[g];
+	   rseq->setGap(gd.pos, gd.len);
+   }
+   //propagate gaps in target sequence as well
+   for (int g=0;g<aln->tgaps.Count();++g) {
+	   GapData &gd=aln->tgaps[g];
+       taseq->setGap(gd.pos, gd.len);
+   }
+   //only the query can be reversed in mgblast alignment
+   if (taseq->revcompl==1)
+         taseq->reverseGaps();
+   GSeqAlign *newmsa=new GSeqAlign(rseq, taseq);
+   //this also sets rseq->msa and taseq->msa to newmsa
+   if (firstRefAln) { //first alignment with refseq so rseq==refseq
+	     //newmsa->incOrd();
+	     newmsa->ordnum=numalns;
+	     alns.Add(newmsa);
+   }
+   else { // rseq != refseq, but an instance of refseq in this current aln
+	    //incrementally add this alignment, as a MSA, to existing MSA,
+	    //propagating gaps through rseq instance
+	   refseq->msa->addAlign(refseq, newmsa, rseq);
+	   delete newmsa; //incorporated, no longer needed
+	   //seqs.Add(taseq->name(),taseq); //this should be added for firstRefAln too, right?
+   }
+
+   seqs.Add(taseq->name(),taseq);
+
+   // new pairwise alignment added to MSA
+   // debug print the progressive alignment
    if (debugMode) {
     for (int a=0;a<alns.Count();a++) {
-      printDebugAln(outf,alns.Get(a),a+1,cdbyank, refcdb);
+    	printDebugAln(outf, alns, a);
       }
     }
- NEXT_LINE_NOCHANGE:
-    //------------
-   delete aln;
+   delete aln; //no longer needed
    if (linebuf->isEof()) break;
-   rlineno++;
-   //-------------
-   if (verbose) {
-     if (rlineno%1000==0) {
-        fprintf(stderr, "..%d", rlineno);
-        if (rlineno%8000==0) fprintf(stderr, "\n");
-        fflush(stderr);
-        }
-     }
-  }  //----> the big loop of parsing input lines from the .lyt files
+ } //----> PAF line parsing loop
+
   //*************** now build MSAs and write them
   delete linebuf;
   if (verbose) {
-     fprintf(stderr, "\n%d input lines processed.\n",rlineno);
+     //fprintf(stderr, "\n%d input lines processed.\n",rlineno);
      fprintf(stderr, "Refining and printing %d MSA(s)..\n", alns.Count());
      fflush(stderr);
      }
 
-  //print all the alignments
+  //print all MSAs found
   for (int i=0;i<alns.Count();i++) {
    GSeqAlign* a=alns.Get(i);
-   loadAlnSeqs(a,cdbyank, refcdb); //loading all sequences for this cluster
    if (debugMode) { //write plain text alignment file
      fprintf(outf,">Alignment%d (%d)\n",i+1, a->Count());
      a->print(outf, 'v');
@@ -302,130 +319,185 @@ int main(int argc, char * const argv[]) {
   // oooooooooo D O N E oooooooooooo
   alns.Clear();
   seqs.Clear();
+
   fflush(outf);
   if (outf!=stdout) fclose(outf);
   if (inf!=stdin) fclose(inf);
-  delete cdbyank;
-  delete refcdb;
-  //GFREE(ref_prefix);
-  //GMessage("*** all done ***\n");
-  #ifdef __WIN32__
-  //getc(stdin);
-  #endif
 }
 
 //---------------------- RefAlign class
-void RefAlign::parseErr(int fldno) {
- fprintf(stderr, "Error parsing input line #%d (field %d):\n%s\n",
-         lineno, fldno, linecpy);
+void PAFAlignment::parseErr(int fldno, const char* line) {
+ fprintf(stderr, "Error parsing input line (field %d):\n%s\n",
+         fldno, line);
  exit(3);
 }
 
-RefAlign::RefAlign(char* line, int len, int lno) {
-  lineno=lno;
-  linecpy=Gstrdup(line);
-  seqname=line;
-  char* p=endSpToken(seqname);
-  if (p==NULL) parseErr(0);
-  *p=0;
-  p++;
-  skipSp(p);
-  if (*p!='-' && *p!='+') parseErr(1);
-  reverse=0;
-  if (*p=='-') reverse=1;
-  p++;
-  clip5=0;
+const char* CIGAR_ERROR="Error parsing cigar string from line: %s (cigar position: %s)\n";
+const char* CS_ERROR="Error parsing cs string from line: %s (cs position: %s)\n";
+
+//this also rebuilds tseq with the target sequence, by transforming refseq according to cs string
+PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr& tseq, const char* line):rgaps(),tgaps(),
+		cs(NULL), nm(-1), cigar(NULL) {
+  //toffs must be the offset of the alignment start from the beginning of the full, original refseq
+  // so it's r_clip5 (or r_clip3 if it's revcomp)
+  seqname=Gstrdup(t[5]);
+  alninfo=al; //do we still need to keep it? *_id pointers will be obsolete
+  reverse=al.reverse;
+  clip5=0; //always cutting out the aligned region from the target sequence
   clip3=0;
-  if (!parseInt(p, seqlen)) parseErr(2);  
-  if (!parseInt(p, offset)) parseErr(3);
-  offset--;
-  skipSp(p);
-  if (isdigit(*p)) {//clipping follows
-      if (!parseInt(p, clip5)) parseErr(4);
-      if (!parseInt(p, clip3)) parseErr(5);
-      }
-  if (reverse!=0) Gswap(clip5, clip3);
-  skipSp(p);
-  gaps=NULL;
-  gaps_onref=NULL;
-  gpos=NULL;
-  gpos_onref=NULL;
-  if (*p==0) return;
-  while (*p!=0 && *p!='R') {
-     while (*p!=' ' && *p!='\t' && *p!=0) p++;
-     skipSp(p);
-     }
-  if (*p==0) return;
-  // it is R
-  p++;
-  if (*p!=':') parseErr(6); //invalid field
-  p++;
-  if (isdigit(*p)) {//should be a number here
-     gaps=p;gpos=p;
-     }
-    else if (*p!='/') parseErr(6);
-  while (*p!=0 && *p!=' ' && *p!='/' && *p!='\t') p++;
-  if (*p==0) return;
-  if (*p=='/') {
-      *p=0;//split here
-      p++;
-      gaps_onref=p;
-      gpos_onref=p;
-     }
+  offset=al.r_alnstart;
+  if (al.reverse) { //offset is on the reverse complement ref string
+	   offset=al.r_len-al.r_alnend;
+	   al.r_alnend=al.r_len-al.r_alnstart;
+	   al.r_alnstart=offset;
   }
-RefAlign::~RefAlign() {
-  GFREE(linecpy); //that was just for error messages
+  seqlen=al.t_alnend-al.t_alnstart; //check this against the cigar string, and the cs string
+  int tnum=t.Count();
+  //parse cigar to get the gaps
+  for (int i=12;i<tnum;++i) {
+	  if (startsWith(t[i], "NM:i:")) {
+		  nm=atoi(t[i]+5);
+		  if (cigar && cs) break;
+		  continue;
+	  }
+	  if (startsWith(t[i], "cg:Z:")) {
+          cigar=Gstrdup(t[i]+5);
+          if (cs && nm>=0) break;
+          continue;
+	  }
+	  if (startsWith(t[i], "cs:Z:")) {
+          cs=Gstrdup(t[i]+5);
+          if (cigar && nm>=0) break;
+          continue;
+	  }
   }
+  if (cigar==NULL || cigar[0]==0) GError(CIGAR_ERROR, line, 0);
+  // gpos = current genomic position (will end up as right coordinate on the genome)
+  // rpos = read position (will end up as the length of the read)
+  // cop = CIGAR operation, cl = operation length
+  int mbases = 0; //count "aligned" bases (includes mismatches)
+  int qpos = 0;  //should match length of aligned region of reference qseq, minus offset
+  int tpos = 0; //will end up with the length of target genome region being aligned
+  GapData gap;
+  char *p=cigar;
+  while (*p != '\0') {
+	  int cl=0;
+	  if (!parseInt(p,cl)) GError(CIGAR_ERROR, line, p);
+	  char cop=*p;
+	  if (cop=='\0') GError(CIGAR_ERROR, line, p);
+	  switch (cop) {
+	   case 'X':
+	   case 'M':
+	   case '=':
+		 //printf("[%d-%d]", gpos, gpos + cl - 1);
+		 tpos+=cl;
+		 qpos+=cl;
+		 ++mbases;
+		 break;
+	   case 'P': //padding;silent deletion from padded reference
+		 // printf("[%d-%d]", pos, pos + cl - 1); // Spans positions, No Coverage
+		 // neither gpos nor rpos are advanced by this operation
+		 break;
+	   case 'H':
+		 // printf("[%d]", pos);  // No coverage
+		 // neither gpos nor rpos are advanced by this operation
+		 break;
+	   case 'S':
+		 //soft clipped bases on query
+		 qpos+=cl;
+		 GMessage("Warning: soft clipping shouldn't be found in this application!\n%s\n", line);
+		 break;
+	   case 'I':
+		 //(gap in genomic (target) seq)
+		 // tpos is not advanced by this operation
+		 qpos+=cl;
+		 gap.pos=tpos;gap.len=cl;
+		 tgaps.Add(gap);
+		 break;
+	   case 'D':
+		 //deletion in reference sequence relative to the query (gap in query ref seq)
+		 tpos += cl;
+		 gap.pos=offset+qpos; gap.len=cl;
+		 rgaps.Add(gap);
+		 break;
+	   case 'N':
+		 // intron
+		 //special skip operation, not contributing to "edit distance",
+		 // printf("[%d-%d]", pos, pos + cl - 1); // Spans positions, No Coverage
+		 //   so num_mismatches is not updated
+		 tpos+=cl;
+		 //shouldn't really happen in genomic PAF
+		 gap.pos=offset+qpos; gap.len=cl;
+		 rgaps.Add(gap);
+		 break;
+	   default:
+		 GError("Error: unhandled cigar_op %c (len %d) in %s\n", cop, cl, line);
+	  } //switch cigar op
+	++p;
+  } // interpret_CIGAR string
+  if (al.t_alnend-al.t_alnstart!=tpos)
+   	GError("Error: tseq alignment length mismatch (%d vs %d-%d) at line:%s\n",tpos, al.t_alnend, al.t_alnstart, line);
+  if (al.r_alnend-al.r_alnstart!=qpos)
+   	GError("Error: ref alignment length mismatch (%d vs %d-%d) at line:%s\n",qpos, al.r_alnend, al.r_alnstart, line);
 
-int RefAlign::nextSeqGap(int& pos) {
- int r=1;
- if (gpos==NULL || *gpos==0) return 0;
- if (!parseInt(gpos,pos)) parseErr(6);
- if (pos<=0) parseErr(6);
- if (*gpos=='+') { //gap length following
-     gpos++;
-     if (!parseInt(gpos,r)) parseErr(6);
-     if (r<=0) parseErr(6);
-     }
- if (*gpos==',') gpos++;
- return r;    
-}
-
-int RefAlign::nextRefGap(int& pos) {
- int r=1;
- if (gpos_onref==NULL || *gpos_onref==0) return 0;
- if (!parseInt(gpos_onref,pos)) parseErr(6);
- if (pos<=0) parseErr(6);
- if (*gpos_onref=='+') { //gap length following
-     gpos_onref++;
-     if (!parseInt(gpos_onref,r)) parseErr(6);
-     if (r<=0) parseErr(6);
-     }
- if (*gpos_onref==',') gpos_onref++;
- return r;    
-}
-
-void printDebugAln(FILE* f, GSeqAlign* aln, int num, GCdbYank* cdbynk, GCdbYank* refcdb) {
-  fprintf(f,">[%d]DebugAlign%d (%d)\n",rlineno+1, num, aln->Count());
-  loadAlnSeqs(aln,cdbynk, refcdb);
-  aln->print(f,'=');
-}
-
-void loadAlnSeqs(GSeqAlign* aln, GCdbYank* cdbynk, GCdbYank* refcdb) {
-  //FastaSeq seq;
-  for (int i=0;i<aln->Count();i++) {
-    GASeq* s=aln->Get(i);
-    if (s->len==0) {//not loaded yet
-      GCdbYank* yankdb=(s->hasFlag(flag_IS_REF) && refcdb!=NULL) ? refcdb : cdbynk;
-      if (yankdb->getRecord(s->id, *s) <= 0)
-        GError("Error retrieving sequence %s from database %s!\n", 
-                                   s->id, yankdb->getDbName());
-      if (s->seqlen!=s->len) 
-        GError("Error: sequence %s length mismatch! Declared %d, retrieved %d\n",
-                           s->id, s->seqlen, s->len);
-      s->allupper();
-      s->loadProcessing();
-      }
+  //interpret cs string to fill tseq
+  tseq="";
+  p=cs;
+  qpos=0; //ref query location in the alignment
+  tpos=0;
+  char tch=0,qch=0;
+  int q_pos=0;
+  while (*p != 0) {
+    char op=*p;
+    int cl=0;
+    p++;
+    switch (op) {
+      case ':':
+    	if (!parseInt(p,cl)) GError(CS_ERROR, line, p);
+    	tseq.appendmem(refseq.getSeq()+offset+qpos, cl);
+    	qpos+=cl;
+    	tpos+=cl;
+    	break;
+      case '*': //substitution
+	    tch=tolower(*p);++p;
+	    qch=tolower(*p);++p;
+	    q_pos=offset+qpos;
+	    if (qch!=refseq.getSeq()[q_pos]) {
+	    	GError("Error: base mismatch %c != qstr[%d] (%c) at line\n%s\n",
+	    			qch, q_pos, refseq.getSeq()[q_pos], line);
+	    }
+	    tseq.append((char)toupper(tch));
+	    ++qpos;
+	    ++tpos;
+   	    break;
+      case '-': //gap in qseq (insertion in q, deletion in tseq)
+    	while (isalpha(tch=tolower(*p))) {
+    		  ++p;
+    		  ++tpos;
+    		  tseq.append((char)toupper(tch));
+    	}
+    	//qpos unchanged, offset++qpos is the location of the gap in qseq
+    	break;
+      case '+': //gap in tseq (insertion in tseq, deletion in qseq)
+    	while (isalpha(qch=tolower(*p))) {
+    		  ++p;
+    		  ++qpos;
+    	}
+    	//tpos unchanged, it is the location of the gap in tseq
+    	break;
+      case '~':
+    	GError("Error: spliced alignments not supported! at line:\n%s\n", line);
+    	break;
+      default:
+        GError("Error: unhandled event at %s in cs, line:\n%s\n",p,line);
     }
+  } //interpret CS string;
  }
+
+void printDebugAln(FILE* f, GList<GSeqAlign>& aa, int a) {
+  ++a;
+  fprintf(f,">[%d]DebugAlign (%d)\n", a, aa[a-1]->Count());
+  aa[a-1]->print(f,'=');
+}
+
 

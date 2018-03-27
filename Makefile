@@ -6,32 +6,65 @@ SAM := ./samtools-0.1.18
 
 GDIR := ../gclib
 
-#SEARCHDIRS := -I${SAM} -I${GDIR}
-SEARCHDIRS := -I${GDIR}
+#INCDIRS := -I${SAM} -I${GDIR}
+INCDIRS := -I${GDIR}
 SYSTYPE :=     $(shell uname)
 
 MACHTYPE :=     $(shell uname -m)
 
 CC      := g++
-BASEFLAGS  = -Wall ${SEARCHDIRS} $(MARCH) -D_FILE_OFFSET_BITS=64 \
--D_LARGEFILE_SOURCE -fno-exceptions -fno-rtti -fno-strict-aliasing \
--D_REENTRANT
+#BASEFLAGS  = -Wall ${INCDIRS} $(MARCH) -D_FILE_OFFSET_BITS=64 \
+#-D_LARGEFILE_SOURCE -fno-exceptions -fno-rtti -fno-strict-aliasing \
+#-D_REENTRANT
 
-ifneq (,$(findstring release,$(MAKECMDGOALS)))
+BASEFLAGS  = -Wall -Wextra ${INCDIRS} -fno-exceptions -fno-rtti \
+ -D_REENTRANT -fno-strict-aliasing
+
+# C/C++ linker and core libs
+
+LINKER := g++
+LDFLAGS := 
+LIBS := 
+
+ifneq (,$(filter %release %static, $(MAKECMDGOALS)))
+  # -- release build
   CFLAGS = -O2 -msse2 -DNDEBUG $(BASEFLAGS)
-  #LDFLAGS = -L${SAM}
-else
-  CFLAGS = -g -DGDEBUG -DDEBUG $(BASEFLAGS)
-  LDFLAGS = -g ${LDFLAGG}
+  LDFLAGS = $(LDFLAGS)
+  LIBS = $(LIBS)
+  ifneq (,$(findstring static,$(MAKECMDGOALS)))
+    LDFLAGS += -static-libstdc++ -static-libgcc
+  endif
+else # debug build
+  ifneq (,$(filter %memcheck %memdebug, $(MAKECMDGOALS)))
+     #make memcheck : use the statically linked address sanitizer in gcc 4.9.x
+     GCCVER49 := $(shell expr `g++ -dumpversion | cut -f1,2 -d.` \>= 4.9)
+     ifeq "$(GCCVER49)" "0"
+       $(error gcc version 4.9 or greater is required for this build target)
+     endif
+     CFLAGS := -fno-omit-frame-pointer -fsanitize=undefined -fsanitize=address
+     GCCVER5 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 5)
+     ifeq "$(GCCVER5)" "1"
+       CFLAGS += -fsanitize=bounds -fsanitize=float-divide-by-zero -fsanitize=vptr
+       CFLAGS += -fsanitize=float-cast-overflow -fsanitize=object-size
+       #CFLAGS += -fcheck-pointer-bounds -mmpx
+     endif
+     CFLAGS += $(BASEFLAGS)
+     CFLAGS := -g -DDEBUG -D_DEBUG -DGDEBUG -fno-common -fstack-protector $(CFLAGS)
+     LDFLAGS := -g $(LDFLAGS)
+     #LIBS := -Wl,-Bstatic -lasan -lubsan -Wl,-Bdynamic -ldl $(LIBS)
+     LIBS := -lasan -lubsan -ldl $(LIBS)
+  else
+     # regular debug build
+     CFLAGS = -g -DDEBUG -D_DEBUG -DGDEBUG $(BASEFLAGS)
+     LDFLAGS = -g $(LDFLAGS)
+     LIBS = $(LIBS)
+  endif
 endif
+
+
 
 %.o : %.cpp
 	${CC} ${CFLAGS} -c $< -o $@
-
-# C/C++ linker
-
-LINKER := g++
-LIBS := 
 
 OBJS := ${GDIR}/GBase.o ${GDIR}/GStr.o ${GDIR}/GArgs.o ${GDIR}/gdna.o ./GapAssem.o
 
@@ -48,9 +81,12 @@ all: paf2msa
 #all:    pwasm pwaor
 debug : all
 release : all
+memcheck : all
+memdebug : all 
+static : all
 
-paf2msa :  ./paf2msa.o ./GapAssem.o ${OBJS}
-	${LINKER} -o $@ ${filter-out %.a %.so, $^} $(LDFLAGS) ${LIBS}
+paf2msa :  ./paf2msa.o ${OBJS}
+	${LINKER} ${LDFLAGS} -o $@ ${filter-out %.a %.so, $^} ${LIBS}
 
 bamcons :  ./bamcons.o ${GDIR}/GFastaIndex.o ${GDIR}/GFaSeqGet.o ${GDIR}/GBam.o ${OBJS} 
 	${LINKER} $(LDFLAGS) -o $@ ${filter-out %.a %.so, $^} -L${SAM} ${LIBS} -lbam
@@ -76,7 +112,7 @@ pwaor :  ./pwaor.o ./GapAssem.o ${GDIR}/GCdbYank.o ${GDIR}/gcdb.o ${OBJS}
 
 .PHONY : tidy
 tidy::
-	${RM} core* pwasm pwasm.exe pwaor pwaor.exe nrcl nrcl.exe *clust *clust.exe *.o ${OBJS}
+	${RM} paf2asm paf2asm.exe pwasm pwasm.exe pwaor pwaor.exe nrcl nrcl.exe *clust *clust.exe *.o ${OBJS}
 
 # target for removing all object files
 

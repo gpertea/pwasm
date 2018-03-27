@@ -9,6 +9,12 @@
 class GSeqAlign;
 class MSAColumns;
 
+#define GA_FLAG_IS_REF     0
+//this is only for tree/transitive embedding:
+#define GA_FLAG_HAS_PARENT 1
+#define GA_FLAG_PREPPED    2
+#define GA_FLAG_BAD_ALN    7
+
 struct SeqDelOp {
   int pos;
   bool revcompl;
@@ -29,25 +35,27 @@ struct SeqDelOp {
 class GASeq : public FastaSeq {
 protected:
    int numgaps; //total number of accumulated gaps in this sequence
-   short *ofs; //array of gaps at each position; 
-              //a negative value (-1) means DELETION of the nucleotide 
+   short *ofs; //array of gaps at each position;
+              //a negative value (-1) means DELETION of the nucleotide
               //at that position!
 
   #ifdef ALIGN_COVERAGE_DATA
    int* cov; //coverage of every nucleotide of this seq
-             // it starts with 0 by itself 
+             // it starts with 0 by itself
              // it'll be decreased by -1 for mismatching ends!
   #endif
-  GList<SeqDelOp>* delops; //delete operations
+  GList<SeqDelOp> delops; //delete operations
+  void prepSeq(); //reverse complement if needed, and apply deletions (delops)
+  //should only be called once when the MSA is complete (by GSeqAlign::finalize())
 public:
   unsigned char flags; //8 general purpose boolean flags (bits)
   // bad_align flag is the last bit -- i.e. bit 7
-  // all the others (0..6) are free for custom use  
+  // all the others (0..6) are free for custom use
   GSeqAlign* msa;
   int msaidx; //actual index at which this sequence is to be found in GASeqAlign;
   int seqlen; // exactly the size of ofs[]
   int offset; //offset in the layout
-  int ng_ofs; //non-gapped offset in the layout 
+  int ng_ofs; //non-gapped offset in the layout
               //(approx, for clipping constraints only)
   char revcompl; //0 = forward, 1=reverse
   int ext5; // layout-positional extension at 5' end
@@ -62,6 +70,12 @@ public:
        seq[i]=toupper(seq[i]);
        }
      }
+  void lowercase() {
+     for (int i=0;i<len;i++) {
+       seq[i]=tolower(seq[i]);
+       }
+     }
+
   void reverseComplement() {
     if (len==0) return;
     //ntCompTableInit();
@@ -79,7 +93,21 @@ public:
      }
   friend class GSeqAlign;
   //-------------------------------
-  GASeq(const char* sname, const char* sdesrc=NULL, char* sseq=NULL);
+  GASeq(FastaSeq& faseq, bool takeover=false);
+  GASeq(GASeq& aseq); //copy constructor
+  GASeq(const char* sname=NULL,int slen=0):FastaSeq(sname),
+		  numgaps(0), ofs(NULL), delops(false, true, false),flags(0),msa(NULL),
+		  msaidx(-1), seqlen(slen), offset(0),
+		  ng_ofs(0),revcompl(0), ext5(0), ext3(0),
+		  clp5(0), clp3(0) {
+   if (seqlen>0) {
+	GCALLOC(ofs, seqlen * sizeof(short));
+	#ifdef ALIGN_COVERAGE_DATA
+		GCALLOC(cov,seqlen*sizeof(int));
+	#endif
+   }
+  };
+  GASeq(const char* sname, const char* sdescr=NULL, const char* sseq=NULL, int slen=0, int soffset=0);
   GASeq(const char* sname, int soffset, int slen, int sclipL=0, int sclipR=0, char rev=0);
   ~GASeq();
   void refineClipping(char* cons, int cons_len, int cpos, bool skipDels=false);
@@ -91,7 +119,7 @@ public:
   inline bool hasFlag(unsigned char bitno) { return ( (((unsigned char)1 << bitno) & flags) !=0 ); }
   int getNumGaps() { return numgaps;  }
   int gap(int pos) { return ofs[pos];  }
-  void removeBase(int pos); //remove the nucleotide at that position                           
+  void removeBase(int pos); //remove the nucleotide at that position
   int endOffset() { return offset+seqlen+numgaps; }
   int endNgOffset() { return ng_ofs+seqlen; }
   int removeClipGaps(); //remove gaps within clipped regions
@@ -99,8 +127,6 @@ public:
   void printGappedSeq(FILE* f, int baseoffs=0);
   void printGappedSeq(int baseoffs=0) { printGappedSeq(stdout, baseoffs); }
   void printGappedFasta(FILE* f);
-  void loadProcessing(); //to be called immediately after loading the sequence
-                   // it will revCompl if needed and apply delops
   #ifdef ALIGN_COVERAGE_DATA
   void addCoverage(GASeq* s);
   #endif
@@ -273,7 +299,7 @@ class GAlnColumn {
    //assumes the seq is already loaded and reverse complemented if necessary
    //position is precisely where it should be
    if (clipped) {
-      if (hasClip==false) {      
+      if (hasClip==false) {
             hasClip=true;
             clipnuc = new NucOri(seq,pos);
             }
@@ -344,15 +370,14 @@ class MSAColumns {
    int len() { return maxcol-mincol+1; }
    void updateMinMax(int minc, int maxc) {
     if (minc<mincol) mincol=minc;
-    if (maxc>maxcol) maxcol=maxc;    
+    if (maxc>maxcol) maxcol=maxc;
     }
 };
 
 
 //-----------------------------------------------
-// a sequence alignment: could be pairwise or MSA
+// a sequence alignment of 2 or more sequences (MSA)
 class GSeqAlign :public GList<GASeq> {
-   static unsigned int counter;
    int length;
    int minoffset;
    int consensus_cap;
@@ -360,7 +385,7 @@ class GSeqAlign :public GList<GASeq> {
    void ErrZeroCov(int col);
  public:
     bool refinedMSA; //if refineMSA() was applied
-    MSAColumns* msacolumns; 
+    MSAColumns* msacolumns;
     unsigned int ordnum; //order number -- when it was created
               // the lower the better (earlier=higher score)
    int ng_len;     //ungapped length and minoffset (approximative,
@@ -377,9 +402,9 @@ class GSeqAlign :public GList<GASeq> {
      }
   bool operator<(GSeqAlign& d){
      return (this<&d);
-     }     
+     }
   //--
-  GSeqAlign():GList<GASeq>(true,true,false), length(0), minoffset(0),
+  GSeqAlign():GList<GASeq>(false,true,false), length(0), minoffset(0),
   		consensus_cap(0), refinedMSA(false), msacolumns(NULL), ordnum(0),
   		ng_len(0),ng_minofs(0), badseqs(0), consensus(NULL), consensus_len(0) {
     //default is: sorted by GASeq offset, free nodes, non-unique
@@ -389,7 +414,7 @@ class GSeqAlign :public GList<GASeq> {
   		consensus_cap(0), refinedMSA(false), msacolumns(NULL), ordnum(0),
   		ng_len(0),ng_minofs(0), badseqs(0), consensus(NULL), consensus_len(0) {
     }
-  void incOrd() { ordnum = ++counter; }
+  void incOrd() { ordnum++; }
   //first time creation from a pairwise alignment:
   #ifdef ALIGN_COVERAGE_DATA
   GSeqAlign(GASeq* s1, int l1, int r1, GASeq* s2, int l2, int r2);
@@ -422,11 +447,12 @@ class GSeqAlign :public GList<GASeq> {
   // *if not OK <=> the layout doesn't accept the merge
   //  due to clipmax constraint, then nothing happens
   bool addAlign(GASeq* seq, GSeqAlign* omsa, GASeq* oseq);
+  void finalize(); //delete inserts and reverse complement sequences as needed
   void print(FILE* f, char c=0);
   void print() { print(stdout); }
   void removeColumn(int column);
   void freeMSA();
-  void refineMSA(bool redo_ends=false); 
+  void refineMSA(bool redo_ends=false);
       // find consensus, refine clipping, remove gap-columns
   void writeACE(FILE* f, const char* name);
   void writeInfo(FILE* f, const char* name);
