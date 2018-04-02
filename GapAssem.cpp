@@ -445,6 +445,7 @@ void GASeq::printGappedFasta(FILE* f) {
 		    "GASeq print Error: invalid sequence data '%s' (len=%d, seqlen=%d)\n",
 		    id, len, seqlen);
 	int i;
+	/*
 	int clipL, clipR;
 	if (revcompl != 0) {
 		clipL = clp3;
@@ -453,6 +454,7 @@ void GASeq::printGappedFasta(FILE* f) {
 		clipL = clp5;
 		clipR = clp3;
 	}
+	*/
 	int printed = 0;
 	for (i = 0; i < seqlen; i++) {
 		if (ofs[i] < 0)
@@ -474,6 +476,46 @@ void GASeq::printGappedFasta(FILE* f) {
 			fprintf(f, "%c", c);
 	} //for each base
 	if (printed < 60)
+		fprintf(f, "\n");
+}
+
+void GASeq::printMFasta(FILE* f, int llen) {
+	if (len == 0 || len != seqlen)
+		GError("GASeq print Error: invalid sequence data '%s' (len=%d, seqlen=%d)\n",
+		    id, len, seqlen);
+	if (this->descrlen>0) fprintf(f, ">%s %s\n", id, descr);
+	else
+	  fprintf(f, ">%s\n", id);
+	int i;
+	int printed = 0;
+	for (i=0;i<offset;i++) {
+		fprintf(f, "-");
+		printed++;
+		if (printed == llen) {
+			fprintf(f, "\n");
+			printed = 0;
+		}
+	}
+	for (i = 0; i < seqlen; i++) {
+		if (ofs[i] < 0)
+			continue; //deleted base
+		for (int j = 0; j < ofs[i]; j++) {
+			fprintf(f, "-");
+			printed++;
+			if (printed == llen) {
+				fprintf(f, "\n");
+				printed = 0;
+			}
+		}
+		char c = seq[i];
+		printed++;
+		if (printed == llen) {
+			fprintf(f, "%c\n", c);
+			printed = 0;
+		} else
+			fprintf(f, "%c", c);
+	} //for each base
+	if (printed < llen)
 		fprintf(f, "\n");
 }
 
@@ -998,7 +1040,8 @@ void GSeqAlign::writeMSA(FILE* f, int linelen) {
 	finalize();
 	for (int i = 0; i < Count(); i++) {
 		GASeq& s = *Get(i);
-		//s->printFastaSeq(f, minoffset);
+		//
+		s.printMFasta(f, linelen);
 	}
 }
 

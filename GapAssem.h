@@ -127,7 +127,7 @@ public:
   void printGappedSeq(FILE* f, int baseoffs=0);
   void printGappedSeq(int baseoffs=0) { printGappedSeq(stdout, baseoffs); }
   void printGappedFasta(FILE* f);
-  void printMFasta(FILE* f, char gapch='-'); //also prints offset padding of gapch
+  void printMFasta(FILE* f, int llen=60); //offset padded
   #ifdef ALIGN_COVERAGE_DATA
   void addCoverage(GASeq* s);
   #endif

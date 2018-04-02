@@ -85,7 +85,7 @@ memcheck : all
 memdebug : all 
 static : all
 
-paf2msa :  ./paf2msa.o ${OBJS}
+paf2msa :  ./paf2msa.o ${OBJS} ${GDIR}/codons.o
 	${LINKER} ${LDFLAGS} -o $@ ${filter-out %.a %.so, $^} ${LIBS}
 
 bamcons :  ./bamcons.o ${GDIR}/GFastaIndex.o ${GDIR}/GFaSeqGet.o ${GDIR}/GBam.o ${OBJS} 
@@ -112,7 +112,7 @@ pwaor :  ./pwaor.o ./GapAssem.o ${GDIR}/GCdbYank.o ${GDIR}/gcdb.o ${OBJS}
 
 .PHONY : tidy
 tidy::
-	${RM} paf2asm paf2asm.exe pwasm pwasm.exe pwaor pwaor.exe nrcl nrcl.exe *clust *clust.exe *.o ${OBJS}
+	${RM} paf2asm paf2asm.exe pwasm pwasm.exe pwaor pwaor.exe nrcl nrcl.exe *clust *clust.exe *.o ${OBJS} ${GDIR}/codons.o
 
 # target for removing all object files
 
