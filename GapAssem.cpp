@@ -608,7 +608,7 @@ bool GSeqAlign::addAlign(GASeq* seq, GSeqAlign* omsa, GASeq* oseq) {
 	// for this merge to work, the shared sequence MUST have
 	// the same orientation in both MSAs
 	if (seq->revcompl != oseq->revcompl)
-		omsa->revComplement();
+		omsa->revComplement(); //reverse-complement all sequences in omsa
 #ifdef ALIGN_COVERAGE_DATA
 	//add coverage values:
 	seq->addCoverage(oseq);

@@ -238,7 +238,7 @@ int main(int argc, char * const argv[]) {
    if (al.reverse) tlabel+='-';
    else tlabel+='+';
    //char* t_seq=Gstrdup(tseq.chars());
-   GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), aln->offset);
+   GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), al.r_alnstart);
    taseq->revcompl=aln->reverse;
    GASeq* rseq=refseq; //only for the first ref alignment
    if (refseq->msa!=NULL) { //already have a MSA
@@ -261,9 +261,11 @@ int main(int argc, char * const argv[]) {
 	   GapData &gd=aln->tgaps[g];
        taseq->setGap(gd.pos, gd.len);
    }
-   //only the query can be reversed in mgblast alignment
-   if (taseq->revcompl==1)
+   /*
+   if (taseq->revcompl==1) {
          taseq->reverseGaps();
+   }
+   */
    GSeqAlign *newmsa=new GSeqAlign(rseq, taseq);
    //this also sets rseq->msa and taseq->msa to newmsa
    if (firstRefAln) { //first alignment with refseq so rseq==refseq
@@ -345,10 +347,11 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
   clip5=0; //always cutting out the aligned region from the target sequence
   clip3=0;
   offset=al.r_alnstart;
+  //int base_ofs=offset; //mismatch base offset -- different for
   if (al.reverse) { //offset is on the reverse complement ref string
 	   offset=al.r_len-al.r_alnend;
-	   al.r_alnend=al.r_len-al.r_alnstart;
-	   al.r_alnstart=offset;
+	   //al.r_alnend=al.r_len-al.r_alnstart;
+	   //al.r_alnstart=offset;
   }
   seqlen=al.t_alnend-al.t_alnstart; //check this against the cigar string, and the cs string
   int tnum=t.Count();
@@ -377,6 +380,8 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
   int mbases = 0; //count "aligned" bases (includes mismatches)
   int qpos = 0;  //should match length of aligned region of reference qseq, minus offset
   int tpos = 0; //will end up with the length of target genome region being aligned
+  int eff_t_len=al.t_alnend-al.t_alnstart; //effective target sequence length
+  //target sequence is to be trimmed to the aligned region
   GapData gap;
   char *p=cigar;
   while (*p != '\0') {
@@ -410,23 +415,30 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 		 //(gap in genomic (target) seq)
 		 // tpos is not advanced by this operation
 		 qpos+=cl;
-		 gap.pos=tpos;gap.len=cl;
+		 if (reverse) gap.pos=eff_t_len-tpos;
+		 else gap.pos=tpos;
+		 gap.len=cl;
 		 tgaps.Add(gap);
 		 break;
 	   case 'D':
 		 //deletion in reference sequence relative to the query (gap in query ref seq)
 		 tpos += cl;
-		 gap.pos=offset+qpos; gap.len=cl;
+		 gap.pos=offset+qpos;
+		 if (reverse) //actual location on qry ref for a reverse complement match:
+			  gap.pos=al.r_len-gap.pos;
+		 gap.len=cl;
 		 rgaps.Add(gap);
 		 break;
 	   case 'N':
 		 // intron
 		 //special skip operation, not contributing to "edit distance",
-		 // printf("[%d-%d]", pos, pos + cl - 1); // Spans positions, No Coverage
-		 //   so num_mismatches is not updated
+		 //   so num_mismatches should not update
 		 tpos+=cl;
 		 //shouldn't really happen in genomic PAF
-		 gap.pos=offset+qpos; gap.len=cl;
+		 gap.pos=offset+qpos;
+		 if (reverse) //actual location on qry ref for a reverse complement match:
+			  gap.pos=al.r_len-gap.pos;
+		 gap.len=cl;
 		 rgaps.Add(gap);
 		 break;
 	   default:
@@ -434,8 +446,8 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	  } //switch cigar op
 	++p;
   } // interpret_CIGAR string
-  if (al.t_alnend-al.t_alnstart!=tpos)
-   	GError("Error: tseq alignment length mismatch (%d vs %d-%d) at line:%s\n",tpos, al.t_alnend, al.t_alnstart, line);
+  if (eff_t_len!=tpos)
+   	GError("Error: tseq alignment length mismatch (%d vs %d(%d-%d)) at line:%s\n",tpos, eff_t_len, al.t_alnend, al.t_alnstart, line);
   if (al.r_alnend-al.r_alnstart!=qpos)
    	GError("Error: ref alignment length mismatch (%d vs %d-%d) at line:%s\n",qpos, al.r_alnend, al.r_alnstart, line);
 
@@ -470,12 +482,14 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	    ++tpos;
    	    break;
       case '-': //gap in qseq (insertion in q, deletion in tseq)
+    	//this insertion is at position (offset+qpos) in ref query if reverse==0
+        // BUT at rlen-(offset+qpos) if reverse==1
     	while (isalpha(tch=tolower(*p))) {
     		  ++p;
     		  ++tpos;
     		  tseq.append((char)toupper(tch));
     	}
-    	//qpos unchanged, offset++qpos is the location of the gap in qseq
+    	//qpos unchanged, offset+qpos is the location of the gap in qseq
     	break;
       case '+': //gap in tseq (insertion in tseq, deletion in qseq)
     	while (isalpha(qch=tolower(*p))) {
