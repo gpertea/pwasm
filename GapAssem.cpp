@@ -969,7 +969,7 @@ void GSeqAlign::finalize() { //prepare for printing
   }
 }
 void GSeqAlign::print(FILE* f, char c) {
-	finalize();
+	finalize(); //this calls prepSeq as needed to reverse complement sequence etc.
 	int max = 0;
 	for (int i = 0; i < Count(); i++) {
 		int n = Get(i)->getNameLen();
@@ -991,6 +991,14 @@ void GSeqAlign::print(FILE* f, char c) {
 		char orientation = s->revcompl == 1 ? '-' : '+';
 		fprintf(f, fmtstr, s->name(), orientation);
 		s->printGappedSeq(f, minoffset);
+	}
+}
+
+void GSeqAlign::writeMSA(FILE* f, int linelen) {
+	finalize();
+	for (int i = 0; i < Count(); i++) {
+		GASeq& s = *Get(i);
+		//s->printFastaSeq(f, minoffset);
 	}
 }
 

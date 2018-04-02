@@ -8,12 +8,13 @@
 #include "GapAssem.h"
 #define USAGE "Usage:\n\
  pfa2msa <pfa_with_cg_cs> -r <refseq.fa>\n\
-    [-o <outfile_maf>]\n\
+    [-o <diff_report.dfa>][-m <outfile.maf>]\n\
     \n\
    <pfa_with_cg_cs> is the input PAF file where a single query was aligned\n\
       to many (larger) target sequences using minimap2 --cs -P\n\
    -r a fasta file with the query sequence to use as reference (required)\n\
-   -o write output to file <outfile_maf> instead of stdout\n"
+   -o write difference data for each target sequence into <diff_report.dfa>\n\
+   -m write MSA as multifasta into <outfile.maf>\n"
 
 #define LOG_MSG_CLIPMAX "Overlap between %s and target %s rejected due to clipmax=%4.2f constraint.\n"
 #define LOG_MSG_OVLCLIP "Overlap between %s and %s invalidated by the %dnt clipping of %s at %d' end.\n"
@@ -126,7 +127,7 @@ char* endSpToken(char* str) {
 //========================================================
 int main(int argc, char * const argv[]) {
  //GArgs args(argc, argv, "DGvd:o:c:");
- GArgs args(argc, argv, "DGvd:p:r:o:c:");
+ GArgs args(argc, argv, "DGvd:p:r:o:m:c:");
  int e;
  if ((e=args.isError())>0)
     GError("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -310,13 +311,15 @@ int main(int argc, char * const argv[]) {
      a->print(outf, 'v');
      }
    else {//write a real ACE file
-     //a->buildMSA();
+	 /*
      GStr ctgname;
      ctgname.format("AorContig%d",i+1);
      a->writeACE(outf, ctgname.chars());
      a->freeMSA(); //free MSA and seq memory
-     }
-   } // for each PMSA cluster
+     */
+
+   }
+ } // for each PMSA cluster
   // oooooooooo D O N E oooooooooooo
   alns.Clear();
   seqs.Clear();
