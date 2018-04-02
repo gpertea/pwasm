@@ -4,7 +4,7 @@
 //bool GASeq::debug=false;
 bool MSAColumns::removeConsGaps = true;
 bool MSAColumns::refineClipping = true;
-unsigned int GSeqAlign::counter = 0;
+//unsigned int GSeqAlign::counter = 0;
 
 int qsortnuc(const void* p1, const void* p2) {
 	GAlnColumn::NucCount* c1 = (GAlnColumn::NucCount*) p1;
@@ -24,66 +24,80 @@ int compareCounts(void* p1, void* p2) {
 	return (v1 > v2) ? -1 : ((v1 < v2) ? 1 : 0);
 }
 
-GASeq::GASeq(const char* sname, const char* sdescr, char* sseq) :
-		FastaSeq(sname, sdescr, sseq) {
-	msa = NULL;
-	numgaps = 0;
-	flags = 0;
-	seqlen = strlen(sseq);
-	offset = 0;
-	ng_ofs = 0;
-	clp5 = 0;
-	clp3 = 0;
-	ext5 = 0;
-	ext3 = 0;
-	revcompl = 0;
-	msaidx = -1;
-	delops = new GList<SeqDelOp>(false, true, false);
-	GCALLOC(ofs, seqlen * sizeof(short));
+GASeq::GASeq(const char* sname, const char* sdescr, const char* sseq, int slen, int soffset) :
+		FastaSeq(sname, sdescr, sseq, slen),
+		  numgaps(0), ofs(NULL), delops(false, true, false),flags(0),msa(NULL),
+		  msaidx(-1), seqlen(slen), offset(soffset),
+		  ng_ofs(soffset),revcompl(0), ext5(0), ext3(0),
+		  clp5(0), clp3(0) {
+	seqlen = len; //FastaSeq constructor settles it
+	if (seqlen>0) {
+      GCALLOC(ofs, seqlen * sizeof(short));
 #ifdef ALIGN_COVERAGE_DATA
 	GCALLOC(cov,seqlen*sizeof(int));
 #endif
+	}
 }
 
 GASeq::GASeq(const char* sname, int soffset, int slen, int sclipL, int sclipR,
-    char rev) :
-		FastaSeq(sname) {
-	msa = NULL;
-	msaidx = -1;
-	flags = 0;
-	numgaps = 0;
-	ext5 = 0;
-	ext3 = 0;
-	seqlen = slen;
-	offset = soffset;
-	ng_ofs = soffset;
-	clp5 = sclipL;
-	clp3 = sclipR;
-	revcompl = rev;
-	delops = new GList<SeqDelOp>(false, true, false);
-	GCALLOC(ofs, seqlen * sizeof(short));
+    char rev) : FastaSeq(sname),
+  		  numgaps(0), ofs(NULL), delops(false, true, false),flags(0),msa(NULL),
+  		  msaidx(-1), seqlen(slen), offset(soffset),
+  		  ng_ofs(soffset),revcompl(rev), ext5(0), ext3(0),
+  		  clp5(sclipL), clp3(sclipR) {
+	if (seqlen>0) {
+	  GCALLOC(ofs, seqlen * sizeof(short));
 #ifdef ALIGN_COVERAGE_DATA
-	GCALLOC(cov,seqlen*sizeof(int));
+	  GCALLOC(cov,seqlen*sizeof(int));
 #endif
+	}
+}
+
+GASeq::GASeq(GASeq& aseq): FastaSeq(aseq.id, aseq.descr, aseq.seq, aseq.len),
+		  numgaps(0), ofs(NULL), delops(false, true, false),flags(0),msa(NULL),
+		  msaidx(-1), seqlen(aseq.len), offset(0),
+		  ng_ofs(0),revcompl(0), ext5(0), ext3(0),
+		  clp5(0), clp3(0) {
+	if (seqlen>0) {
+      GCALLOC(ofs, seqlen * sizeof(short));
+#ifdef ALIGN_COVERAGE_DATA
+	  GCALLOC(cov,seqlen*sizeof(int));
+#endif
+	}
+}
+
+GASeq::GASeq(FastaSeq& faseq, bool takeover):FastaSeq(faseq, takeover),
+		  numgaps(0), ofs(NULL), delops(false, true, false),flags(0),msa(NULL),
+		  msaidx(-1), seqlen(len), offset(0),
+		  ng_ofs(0),revcompl(0), ext5(0), ext3(0),
+		  clp5(0), clp3(0) {
+	if (seqlen>0) {
+      GCALLOC(ofs, seqlen * sizeof(short));
+#ifdef ALIGN_COVERAGE_DATA
+	  GCALLOC(cov,seqlen*sizeof(int));
+#endif
+	}
 }
 
 GASeq::~GASeq() {
 	GFREE(ofs);
-	delete delops;
 #ifdef ALIGN_COVERAGE_DATA
 	GFREE(cov);
 #endif
 }
 
-void GASeq::loadProcessing() {
-	//process all delops
-	for (int i = 0; i < delops->Count(); i++) {
-		SeqDelOp& delop = *delops->Get(i);
+void GASeq::prepSeq() {
+	//should only be called once (use hasFlag() before calling)
+	//apply all deletions to the sequence
+	for (int i = 0; i < delops.Count(); i++) {
+		SeqDelOp& delop = *delops.Get(i);
 		int pos = delop.revcompl ? len - delop.pos - 1 : delop.pos;
 		removeBase(pos);
 	}
 	if (revcompl == 1)
 		reverseComplement();
+
+	setFlag(GA_FLAG_PREPPED);
 }
 
 //set the gap length in this position
@@ -543,19 +557,16 @@ void GASeq::toMSA(MSAColumns& msacols) {
 #ifdef ALIGN_COVERAGE_DATA
 GSeqAlign::GSeqAlign(GASeq* s1, int l1, int r1,
 		GASeq* s2, int l2, int r2)
-:GList<GASeq>(true,true,false) {
+:GList<GASeq>(false,true,false) {
 #else
+
 GSeqAlign::GSeqAlign(GASeq* s1, GASeq* s2) :
-		GList<GASeq>(true, true, false) {
+		GList<GASeq>(false, true, false), length(0), minoffset(0),
+  		consensus_cap(0), refinedMSA(false), msacolumns(NULL), ordnum(0),
+  		ng_len(0),ng_minofs(0), badseqs(0), consensus(NULL), consensus_len(0) {
 #endif
-	msacolumns = NULL;
-	badseqs = 0;
 	s1->msa = this;
 	s2->msa = this;
-	refinedMSA = false;
-	consensus = NULL;
-	consensus_len = 0;
-	consensus_cap = 0;
 	//the offset for at least one sequence is 0
 	this->Add(s1);
 	this->Add(s2);
@@ -565,7 +576,6 @@ GSeqAlign::GSeqAlign(GASeq* s1, GASeq* s2) :
 	length -= minoffset;
 	ng_len = GMAX(s1->endNgOffset(), s2->endNgOffset());
 	ng_len -= ng_minofs;
-
 	//-- according to the alignment, update the coverage for each sequence
 	//-- overlaps are granted +1 bonus
 #ifdef ALIGN_COVERAGE_DATA
@@ -588,7 +598,7 @@ GSeqAlign::GSeqAlign(GASeq* s1, GASeq* s2) :
 #endif
 }
 
-//merge other alignment omsa into this msa 
+//merge other alignment omsa into this msa
 //seq->id MUST be the same with oseq->id
 bool GSeqAlign::addAlign(GASeq* seq, GSeqAlign* omsa, GASeq* oseq) {
 	//error checking -- could be disabled to speed it up a bit
@@ -637,7 +647,7 @@ bool GSeqAlign::addAlign(GASeq* seq, GSeqAlign* omsa, GASeq* oseq) {
 	return true;
 }
 
-//just to automatically set the offset, msa, 
+//just to automatically set the offset, msa,
 //and to update the MSA length if needed
 void GSeqAlign::addSeq(GASeq* s, int soffs, int ngofs) {
 	s->offset = soffs;
@@ -951,7 +961,15 @@ void GSeqAlign::revComplement() {
 	Sort();
 }
 
+void GSeqAlign::finalize() { //prepare for printing
+  for (int i=0;i<Count();i++) {
+	 GASeq* s=Get(i);
+	 if (s->len==0)  GError("Error: sequence for %s not loaded!\n",s->getId());
+	 if (!s->hasFlag(GA_FLAG_PREPPED)) s->prepSeq();
+  }
+}
 void GSeqAlign::print(FILE* f, char c) {
+	finalize();
 	int max = 0;
 	for (int i = 0; i < Count(); i++) {
 		int n = Get(i)->getNameLen();
@@ -1022,14 +1040,13 @@ void GSeqAlign::buildMSA() {
 	msacolumns = new MSAColumns(length, minoffset);
 	for (int i = 0; i < Count(); i++) {
 		GASeq* seq = Get(i);
-		seq->msaidx = i; // GSeqAlign is sorted by offset
-		                 // this will speed up some later adjustments
+		seq->msaidx = i; // if GSeqAlign is sorted by offset
+		                 // this could speed up some later adjustments
 		if (seq->seqlen - seq->clp3 - seq->clp5 < 1) {
-			fprintf(stderr,
-			    "Warning: sequence %s (length %d) was trimmed too badly (%d,%d)"
-					    " -- should remove it from MSA w/ %s!\n", seq->id, seq->seqlen,
+			GMessage("Warning: sequence %s (length %d) was trimmed too badly (%d,%d)"
+					 " -- should be removed from MSA w/ %s!\n", seq->id, seq->seqlen,
 			    seq->clp5, seq->clp3, Get(0)->id);
-			seq->setFlag(7); //bad-align flag!
+			seq->setFlag(GA_FLAG_BAD_ALN); //bad-align flag!
 			badseqs++;
 		}
 		seq->toMSA(*msacolumns);

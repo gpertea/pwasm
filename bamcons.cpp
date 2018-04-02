@@ -581,7 +581,7 @@ void loadRefSeq(GASeq& s, GFastaHandler* refcdb) { //, GCdbYank* cdbynk, GCdbYan
 		 if (seq) {
 			 s.setSeqPtr(seq, seqlen);
 			 s.allupper();
-			 s.loadProcessing();
+			 s.prepSeq();
 			}
 	}
 }

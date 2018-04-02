@@ -440,8 +440,9 @@ void loadAlnSeqs(GSeqAlign* aln, GCdbYank* cdbynk, GCdbYank* refcdb) {
         GError("Error: sequence %s length mismatch! Declared %d, retrieved %d\n",
                            s->id, s->seqlen, s->len);
       s->allupper();
-      s->loadProcessing();
+      //s->prepSeq();
       }
     }
+   aln->finalize(); 
  }
 
