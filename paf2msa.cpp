@@ -252,7 +252,6 @@ int main(int argc, char * const argv[]) {
    }
    //once a gap, always a gap
    //propagate gaps in ref seq from the current alignment
-
    for (int g=0;g<aln->rgaps.Count();++g) {
 	   GapData &gd=aln->rgaps[g];
 	   rseq->setGap(gd.pos, gd.len);

@@ -28,9 +28,9 @@ LIBS :=
 
 ifneq (,$(filter %release %static, $(MAKECMDGOALS)))
   # -- release build
-  CFLAGS = -O2 -msse2 -DNDEBUG $(BASEFLAGS)
-  LDFLAGS = $(LDFLAGS)
-  LIBS = $(LIBS)
+  CFLAGS := -O2 -msse2 -DNDEBUG $(BASEFLAGS)
+  LDFLAGS := $(LDFLAGS)
+  LIBS := $(LIBS)
   ifneq (,$(findstring static,$(MAKECMDGOALS)))
     LDFLAGS += -static-libstdc++ -static-libgcc
   endif
@@ -55,9 +55,9 @@ else # debug build
      LIBS := -lasan -lubsan -ldl $(LIBS)
   else
      # regular debug build
-     CFLAGS = -g -DDEBUG -D_DEBUG -DGDEBUG $(BASEFLAGS)
-     LDFLAGS = -g $(LDFLAGS)
-     LIBS = $(LIBS)
+     CFLAGS := -g -DDEBUG -D_DEBUG -DGDEBUG $(BASEFLAGS)
+     LDFLAGS := -g $(LDFLAGS)
+     LIBS := $(LIBS)
   endif
 endif
 
