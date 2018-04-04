@@ -107,7 +107,9 @@ struct TDiffInfo {
 	void setContext(GStr& tseq) {
 		 int tc_start=tloc-5;
 		 if (tc_start<0) tc_start=0;
-		 int tc_end=tloc+evtlen+5;
+		 int evt_len=evtlen;
+		 if (evt=='D') evt_len=0;
+		 int tc_end=tloc+evt_len+5;
 		 if (tc_end>=tseq.length()) tc_end=tseq.length()-1;
 		 context=tseq.substr(tc_start, tc_end-tc_start);
 	}
@@ -369,7 +371,6 @@ int main(int argc, char * const argv[]) {
 
   //fflush(outf);
   if (freport!=stdout) fclose(freport);
-  if (fmsa) fclose(fmsa);
   if (inf!=stdin) fclose(inf);
 }
 
@@ -473,7 +474,8 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	    	tdiffs.Last().evtsub.append((char)toupper(qch));
 	    }
 	    else {
-			dif.init('S', 1, q_pos, tpos);
+	    	s_pos= reverse ? eff_t_len-tpos : tpos;
+			dif.init('S', 1, q_pos, s_pos);
 			dif.evtbases.append((char)toupper(tch));
 			dif.evtsub.append((char)toupper(qch));
 			//keep substitutions on reverse to simplify merging
@@ -504,6 +506,7 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 		//insert in tseq
     	e_len=tpos-s_pos;
     	q_pos=offset+qpos;
+    	if (reverse) s_pos=eff_t_len-s_pos;
 		dif.init('I', e_len, q_pos, s_pos);
 		dif.evtbases.append(tseq.substr(-e_len));
 		if (reverse) {
@@ -522,7 +525,7 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
     	e_len=qpos-s_pos;
     	q_pos=s_pos+offset;
     	//these bases are missing in tseq (deletion)
-		dif.init('D', e_len, q_pos, tpos);
+		dif.init('D', e_len, q_pos, (reverse ? eff_t_len-tpos : tpos));
 		dif.evtbases.append(refseq.getSeq()+q_pos, e_len);
 		if (reverse) {
 			revCompl(dif.evtbases);
@@ -698,12 +701,12 @@ void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, const char* rqseq) {
 	if (hpolyCheck(di)) status="homopolymer detected";
     mmotifCheck(di, status);
     if (di.evt=='S')
-    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(), di.tloc, di.context.chars(), status.chars());
+    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(), di.tloc+1, di.context.chars(), status.chars());
     else {
     	GStr fmt("%c\t%d\t%d(%c)\t");
     	if (di.evt=='I') fmt.append(":%s\t%d\t%s\t%s\n");
     			else fmt.append("%s:\t%d\t%s\t%s\n");
-    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, di.evtbases.chars(), di.tloc, di.context.chars(), status.chars());
+    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, di.evtbases.chars(), di.tloc+1, di.context.chars(), status.chars());
 
     }
   }
