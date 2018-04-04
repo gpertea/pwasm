@@ -9,14 +9,14 @@
 #include "codons.h"
 
 #define USAGE "Usage:\n\
- pfa2msa <pfa_with_cg_cs> -r <refseq.fa>\n\
-    [-o <diff_report.dfa>][-m <outfile.maf>]\n\
+ pafreport <paf_with_cg_cs> -r <refseq.fa> \n\
+    [-o <diff_report.dfa>][-w <outfile.mfa>]\n\
     \n\
-   <pfa_with_cg_cs> is the input PAF file where a single query was aligned\n\
+   <paf_with_cg_cs> is the input PAF file where a single query was aligned\n\
       to many (larger) target sequences using minimap2 --cs -P\n\
    -r a fasta file with the query sequence to use as reference (required)\n\
    -o write difference data for each target sequence into <diff_report.dfa>\n\
-   -m write MSA as multifasta into <outfile.maf>\n"
+   -w write MSA as multifasta into <outfile.mfa>\n"
 
 #define LOG_MSG_CLIPMAX "Overlap between %s and target %s rejected due to clipmax=%4.2f constraint.\n"
 #define LOG_MSG_OVLCLIP "Overlap between %s and %s invalidated by the %dnt clipping of %s at %d' end.\n"
@@ -159,7 +159,7 @@ char* endSpToken(char* str) {
 //========================================================
 int main(int argc, char * const argv[]) {
  //GArgs args(argc, argv, "DGvd:o:c:");
- GArgs args(argc, argv, "DGvd:p:r:o:m:c:");
+ GArgs args(argc, argv, "DGvd:p:r:o:m:w:c:");
  int e;
  if ((e=args.isError())>0)
     GError("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -209,7 +209,7 @@ int main(int argc, char * const argv[]) {
           }
 
       } //clipmax option
-  GStr msafile=args.getOpt('o');
+  GStr msafile=args.getOpt('w');
   FILE* fmsa=NULL;
   if (!msafile.is_empty()) {
      fmsa=fopen(msafile, "w");
@@ -369,6 +369,7 @@ int main(int argc, char * const argv[]) {
 
   //fflush(outf);
   if (freport!=stdout) fclose(freport);
+  if (fmsa) fclose(fmsa);
   if (inf!=stdin) fclose(inf);
 }
 
@@ -648,16 +649,38 @@ bool hpolyCheck(TDiffInfo& d) {
 	return false;
 }
 
-bool metmotifCheck(TDiffInfo& d, GStr& stat) {
-	GStr s(d.context);
-	s.upper();
+bool mmotifCheck(TDiffInfo& d, GStr& stat) {
 	//for deletions, also search for methylation motifs in evtbases
 	if (d.evt=='D') {
 	  GStr r_ev(d.evtbases);
 	  revCompl(r_ev);
-
+	  int m=0;
+      while (metmot[m]!=NULL) {
+    	  if (d.evtbases.index(metmot[m])>=0 ||
+    		r_ev.index(metmot[m])>=0) {
+    		stat="motif ";
+    		stat.append(metmot[m]);
+    		return true;
+    	  }
+    	++m;
+	  }
 	}
-
+//now similarly for the context -- does it even make sense?
+	GStr ctx(d.context);
+	ctx.upper();
+	GStr r_c(ctx);
+	revCompl(r_c);
+	int m=0;
+	while (metmot[m]!=NULL) {
+  	  if (ctx.index(metmot[m])>=0 ||
+  			r_c.index(metmot[m])>=0) {
+  		  stat="motif ";
+  		  stat.append(metmot[m]);
+  		  stat.append(" within context");
+  		  return true;
+  	  }
+  	++m;
+    }
 	return false;
 }
 void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, const char* rqseq) {
@@ -673,7 +696,7 @@ void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, const char* rqseq) {
     GStr status=".";
 	//check for homopolymers at the location
 	if (hpolyCheck(di)) status="homopolymer detected";
-
+    mmotifCheck(di, status);
     if (di.evt=='S')
     	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(), di.tloc, di.context.chars(), status.chars());
     else {
