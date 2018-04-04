@@ -6,14 +6,17 @@
 #include "GHash.hh"
 #include "GList.hh"
 #include "GapAssem.h"
+#include "codons.h"
+
 #define USAGE "Usage:\n\
- pfa2msa <pfa_with_cg_cs> -r <refseq.fa>\n\
-    [-o <outfile_maf>]\n\
+ pafreport <paf_with_cg_cs> -r <refseq.fa> \n\
+    [-o <diff_report.dfa>][-w <outfile.mfa>]\n\
     \n\
-   <pfa_with_cg_cs> is the input PAF file where a single query was aligned\n\
+   <paf_with_cg_cs> is the input PAF file where a single query was aligned\n\
       to many (larger) target sequences using minimap2 --cs -P\n\
    -r a fasta file with the query sequence to use as reference (required)\n\
-   -o write output to file <outfile_maf> instead of stdout\n"
+   -o write difference data for each target sequence into <diff_report.dfa>\n\
+   -w write MSA as multifasta into <outfile.mfa>\n"
 
 #define LOG_MSG_CLIPMAX "Overlap between %s and target %s rejected due to clipmax=%4.2f constraint.\n"
 #define LOG_MSG_OVLCLIP "Overlap between %s and %s invalidated by the %dnt clipping of %s at %d' end.\n"
@@ -24,15 +27,17 @@ bool removeConsGaps=false;
 bool verbose=false;
 //int rlineno=0;
 
-FILE* outf=NULL;
+//methylation motifs:
+const char* const metmot[] = { "GATC", "GTAC", "CCAGG", "CCTGG", NULL };
+//look for these or a homopolymer around the indel/substitution event
 
 GHash<GASeq> seqs(false);
 
 //list of collected MSAs
-GList<GSeqAlign> alns(true, true,false);
+//GList<GSeqAlign> alns(true, true,false);
                  // sorted, free element, not unique
 
-void printDebugAln(FILE* f, GList<GSeqAlign>& aa, int a);
+void printDebugAln(FILE* f, GSeqAlign* a);
 
 float clipmax=0;
 //--------------------------------
@@ -78,22 +83,49 @@ struct AlnInfo {
   }
 };
 
+struct TDiffInfo {
+	char evt; //event code: I=insertion, D=deletion, S=substitution
+	int evtlen; //event length (bases)
+	GStr evtbases; //bases inserted, deleted or as substituted
+	GStr evtsub;  //for substitutions, the original base(s)
+	int rloc; //location of the event on ref query sequence
+	int tloc; //location of the event within the aligned target region, on the *aligned strand*
+	GStr context; //5 bases before and after the event (at least 11 bases)
+	char flags; //indicates if a methylation motif or a homopolymer was found in the context
+	TDiffInfo(char e=0):evt(e), evtlen(0), evtbases("",8), evtsub("",8), rloc(0),tloc(0),
+			context("",18), flags(0) { }
+	void init(char e, int len, int rpos, int tpos) {
+		evt=e;
+		evtlen=len;
+		rloc=rpos;
+		tloc=tpos;
+		evtbases.clear(8);
+		evtsub.clear(8);
+		context.clear(18);
+		flags=0;
+	}
+	void setContext(GStr& tseq) {
+		 int tc_start=tloc-5;
+		 if (tc_start<0) tc_start=0;
+		 int tc_end=tloc+evtlen+5;
+		 if (tc_end>=tseq.length()) tc_end=tseq.length()-1;
+		 context=tseq.substr(tc_start, tc_end-tc_start);
+	}
+    bool operator<(TDiffInfo o) {
+    	return (rloc<o.rloc);
+    }
+};
+
 class PAFAlignment {
-  //char* linecpy;
-  //int lineno; //input file line#
-	/*
-  char* gpos;
-  char* gpos_onref;
-  char* gaps;//char string with gaps in this read
-  char* gaps_onref;//char string with gaps in reference
-  */
  public:
   AlnInfo alninfo;
   GVec<GapData> rgaps; //reference query gaps
   GVec<GapData> tgaps; //target gaps
+  GVec<TDiffInfo> tdiffs; //indel/substitution events on this target sequence
   char* seqname; //aligned target sequence (read, or genome mapping)
   char* cs; //cs tag value = difference string (short)
-  int nm; //number of 1bp edits (edit distance)
+  int edist; //number of 1bp edits (edit distance) = NM tag value
+  int alnscore; // AS tag value
   char* cigar;
 
   int seqlen; //length of this tseq (target sequence, unedited)
@@ -102,6 +134,7 @@ class PAFAlignment {
   int clip3; //amount to clip on the right end (0 for PAF on tseq)
   char reverse; //0, or 1 if this mapping is reverse complemented
   void parseErr(int fldno, const char* line);
+  void printDiffInfo(GStr& tlabel, FILE* f, const char* rqseq);
   PAFAlignment(GDynArray<char*>& t, AlnInfo& alni, GASeq& refseq, GStr& tseq, const char* line);
    //this also rebuilds tseq with the target sequence, by transforming refseq according to cs string
   ~PAFAlignment() { GFREE(seqname); GFREE(cs); GFREE(cigar); }
@@ -126,7 +159,7 @@ char* endSpToken(char* str) {
 //========================================================
 int main(int argc, char * const argv[]) {
  //GArgs args(argc, argv, "DGvd:o:c:");
- GArgs args(argc, argv, "DGvd:p:r:o:c:");
+ GArgs args(argc, argv, "DGvd:p:r:o:m:w:c:");
  int e;
  if ((e=args.isError())>0)
     GError("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -134,7 +167,10 @@ int main(int argc, char * const argv[]) {
  debugMode=(args.getOpt('D')!=NULL);
  removeConsGaps=(args.getOpt('G')==NULL);
  verbose=(args.getOpt('v')!=NULL);
- if (debugMode) verbose=true;
+ if (debugMode) {
+	  verbose=true;
+	  //outf=stdout;
+ }
  MSAColumns::removeConsGaps=removeConsGaps;
  GStr infile;
  if (args.startNonOpt()) {
@@ -173,13 +209,22 @@ int main(int argc, char * const argv[]) {
           }
 
       } //clipmax option
+  GStr msafile=args.getOpt('w');
+  FILE* fmsa=NULL;
+  if (!msafile.is_empty()) {
+     fmsa=fopen(msafile, "w");
+     if (fmsa==NULL)
+        GError("Cannot open file %s for writing!\n",msafile.chars());
+  }
+
   GStr outfile=args.getOpt('o');
+  FILE* freport=NULL;
   if (!outfile.is_empty()) {
-     outf=fopen(outfile, "w");
-     if (outf==NULL)
+     freport=fopen(outfile, "w");
+     if (freport==NULL)
         GError("Cannot open file %s for writing!\n",outfile.chars());
      }
-   else outf=stdout;
+   else freport=stdout;
   //************************************************
   s=args.getOpt('r');
   if (s.is_empty()) GError("Error: query sequence file (-r) is required!\n");
@@ -189,15 +234,15 @@ int main(int argc, char * const argv[]) {
   if (r==NULL || faseq.getSeqLen()==0)
 	  GError("Error loading FASTA sequence from file %s !\n",s.chars());
   GASeq *refseq=new GASeq(faseq, true); //take over faseq data
-  refseq->lowercase();
+  refseq->allupper();
   GASeq refseq_rc(*refseq);
   refseq_rc.reverseComplement();
   GLineReader* linebuf=new GLineReader(inf);
   char* line;
-  alns.setSorted(compareOrdnum);
+  //alns.setSorted(compareOrdnum);
   refseq->setFlag(GA_FLAG_IS_REF);
   seqs.Add(refseq->getId(),refseq);
-
+  GSeqAlign *refMSA=NULL; //this will be the final MSA
   int numalns=0;
   GDynArray<char*> t(24);
   while ((line=linebuf->getLine())!=NULL) {
@@ -237,8 +282,10 @@ int main(int argc, char * const argv[]) {
    tlabel+=al.t_alnend;
    if (al.reverse) tlabel+='-';
    else tlabel+='+';
-   //char* t_seq=Gstrdup(tseq.chars());
-   GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), aln->offset);
+   if (freport) {
+        aln->printDiffInfo(tlabel, freport, refseq->getSeq());
+   }
+   GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), al.r_alnstart);
    taseq->revcompl=aln->reverse;
    GASeq* rseq=refseq; //only for the first ref alignment
    if (refseq->msa!=NULL) { //already have a MSA
@@ -261,66 +308,68 @@ int main(int argc, char * const argv[]) {
 	   GapData &gd=aln->tgaps[g];
        taseq->setGap(gd.pos, gd.len);
    }
-   //only the query can be reversed in mgblast alignment
-   if (taseq->revcompl==1)
+   /*
+   if (taseq->revcompl==1) {
          taseq->reverseGaps();
+   }
+   */
    GSeqAlign *newmsa=new GSeqAlign(rseq, taseq);
    //this also sets rseq->msa and taseq->msa to newmsa
    if (firstRefAln) { //first alignment with refseq so rseq==refseq
 	     //newmsa->incOrd();
 	     newmsa->ordnum=numalns;
-	     alns.Add(newmsa);
+	     //alns.Add(newmsa);
+	     refMSA=newmsa;
    }
    else { // rseq != refseq, but an instance of refseq in this current aln
 	    //incrementally add this alignment, as a MSA, to existing MSA,
 	    //propagating gaps through rseq instance
 	   refseq->msa->addAlign(refseq, newmsa, rseq);
 	   delete newmsa; //incorporated, no longer needed
-	   //seqs.Add(taseq->name(),taseq); //this should be added for firstRefAln too, right?
    }
 
-   seqs.Add(taseq->name(),taseq);
-
+   seqs.Add(al.t_id,taseq);
    // new pairwise alignment added to MSA
    // debug print the progressive alignment
+   /*
    if (debugMode) {
-    for (int a=0;a<alns.Count();a++) {
-    	printDebugAln(outf, alns, a);
-      }
+    //for (int a=0;a<alns.Count();a++) {
+    	printDebugAln(stderr, refMSA);
+     // }
     }
+    */
    delete aln; //no longer needed
    if (linebuf->isEof()) break;
  } //----> PAF line parsing loop
 
   //*************** now build MSAs and write them
   delete linebuf;
-  if (verbose) {
-     //fprintf(stderr, "\n%d input lines processed.\n",rlineno);
-     fprintf(stderr, "Refining and printing %d MSA(s)..\n", alns.Count());
-     fflush(stderr);
-     }
-
   //print all MSAs found
-  for (int i=0;i<alns.Count();i++) {
-   GSeqAlign* a=alns.Get(i);
+  //for (int i=0;i<alns.Count();i++) {
+   //GSeqAlign* a=alns.Get(i);
    if (debugMode) { //write plain text alignment file
-     fprintf(outf,">Alignment%d (%d)\n",i+1, a->Count());
-     a->print(outf, 'v');
+     fprintf(stderr,">MSA (%d)\n",refMSA->Count());
+     refMSA->print(stderr, 'v');
      }
-   else {//write a real ACE file
-     //a->buildMSA();
+   if (fmsa) {//write a real ACE file
+	 /*
      GStr ctgname;
      ctgname.format("AorContig%d",i+1);
      a->writeACE(outf, ctgname.chars());
      a->freeMSA(); //free MSA and seq memory
-     }
-   } // for each PMSA cluster
+     */
+     refMSA->writeMSA(fmsa);
+     fclose(fmsa);
+   }
+ //} // for each MSA cluster
   // oooooooooo D O N E oooooooooooo
-  alns.Clear();
+  //alns.Clear();
+  delete refMSA;
   seqs.Clear();
 
-  fflush(outf);
-  if (outf!=stdout) fclose(outf);
+  //fflush(outf);
+  if (freport!=stdout) fclose(freport);
+  if (fmsa) fclose(fmsa);
   if (inf!=stdin) fclose(inf);
 }
 
@@ -331,12 +380,16 @@ void PAFAlignment::parseErr(int fldno, const char* line) {
  exit(3);
 }
 
+void revCompl(GStr& s) {
+	s.tr(IUPAC_DEFS, IUPAC_COMP);
+	s.reverse();
+}
 const char* CIGAR_ERROR="Error parsing cigar string from line: %s (cigar position: %s)\n";
 const char* CS_ERROR="Error parsing cs string from line: %s (cs position: %s)\n";
 
 //this also rebuilds tseq with the target sequence, by transforming refseq according to cs string
-PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr& tseq, const char* line):rgaps(),tgaps(),
-		cs(NULL), nm(-1), cigar(NULL) {
+PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr& tseq, const char* line):rgaps(),
+		tgaps(),tdiffs(), cs(NULL), edist(-1), alnscore(0), cigar(NULL) {
   //toffs must be the offset of the alignment start from the beginning of the full, original refseq
   // so it's r_clip5 (or r_clip3 if it's revcomp)
   seqname=Gstrdup(t[5]);
@@ -345,40 +398,170 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
   clip5=0; //always cutting out the aligned region from the target sequence
   clip3=0;
   offset=al.r_alnstart;
+  //int base_ofs=offset; //mismatch base offset -- different for
   if (al.reverse) { //offset is on the reverse complement ref string
 	   offset=al.r_len-al.r_alnend;
-	   al.r_alnend=al.r_len-al.r_alnstart;
-	   al.r_alnstart=offset;
   }
   seqlen=al.t_alnend-al.t_alnstart; //check this against the cigar string, and the cs string
   int tnum=t.Count();
-  //parse cigar to get the gaps
+  char got=0;
+  char gotall=1+2+4+8;
   for (int i=12;i<tnum;++i) {
 	  if (startsWith(t[i], "NM:i:")) {
-		  nm=atoi(t[i]+5);
-		  if (cigar && cs) break;
+		  edist=atoi(t[i]+5);
+		  got|=1;
+		  if (got==gotall) break;
+		  continue;
+	  }
+	  if (startsWith(t[i], "AS:i:")) {
+		  alnscore=atoi(t[i]+5);
+		  got|=2;
+		  if (got==gotall) break;
 		  continue;
 	  }
 	  if (startsWith(t[i], "cg:Z:")) {
           cigar=Gstrdup(t[i]+5);
-          if (cs && nm>=0) break;
+          got|=4;
+          if (got==gotall) break;
           continue;
 	  }
 	  if (startsWith(t[i], "cs:Z:")) {
           cs=Gstrdup(t[i]+5);
-          if (cigar && nm>=0) break;
+          got|=8;
+          if (got==gotall) break;
           continue;
 	  }
   }
   if (cigar==NULL || cigar[0]==0) GError(CIGAR_ERROR, line, 0);
+  int qpos = 0;  //should match length of aligned region of reference qseq, minus offset
+  int tpos = 0; //will end up with the length of target genome region being aligned
+  int eff_t_len=al.t_alnend-al.t_alnstart; //effective target sequence length
+  //target sequence is to be trimmed to the aligned region
+  char *p=cs;
+  TDiffInfo dif;
+  //interpret cs string to fill tseq
+  tseq="";
+  qpos=0; //ref query location in the alignment
+  tpos=0;
+  char tch=0,qch=0;
+  int q_pos=0; //real ref query location (adjusted for offset and strand)
+  int s_pos=0; //similar for qry
+  int e_len=0;
+  while (*p != 0) {
+    char op=*p;
+    int cl=0;
+    p++;
+    switch (op) {
+      case ':':
+    	if (!parseInt(p,cl)) GError(CS_ERROR, line, p);
+    	tseq.appendmem(refseq.getSeq()+offset+qpos, cl);
+    	qpos+=cl;
+    	tpos+=cl;
+    	break;
+      case '*': //substitution
+	    tch=toupper(*p);++p;
+	    qch=toupper(*p);++p;
+	    q_pos=offset+qpos;
+	    if (qch!=refseq.getSeq()[q_pos]) {
+	    	GError("Error: base mismatch %c != qstr[%d] (%c) at line\n%s\n",
+	    			qch, q_pos, refseq.getSeq()[q_pos], line);
+	    }
+	    //merge adjacent substitutions into a single event
+	    if (tdiffs.Count()>0 && tdiffs.Last().evt=='S' &&
+	    		tdiffs.Last().rloc==q_pos-tdiffs.Last().evtbases.length()) {
+	    	tdiffs.Last().evtbases.append((char)toupper(tch));
+	    	tdiffs.Last().evtsub.append((char)toupper(qch));
+	    }
+	    else {
+			dif.init('S', 1, q_pos, tpos);
+			dif.evtbases.append((char)toupper(tch));
+			dif.evtsub.append((char)toupper(qch));
+			//keep substitutions on reverse to simplify merging
+			/*
+			if (reverse) {
+				revCompl(dif.evtbases);
+				dif.rloc=al.r_len-q_pos;
+			}
+			*/
+			tdiffs.Add(dif);
+	    }
+	    //
+	    tseq.append((char)tolower(tch));
+	    ++qpos;
+	    ++tpos;
+   	    break;
+      case '-': //gap in ref qseq (insertion in tseq)
+    	//this gap is at position (offset+qpos) in ref query if reverse==0
+    	// BUT at rlen-(offset+qpos) if reverse==1
+    	//s_pos= reverse ? eff_t_len-tpos : tpos;
+    	s_pos=tpos;
+    	//these bases are only in tseq (insert)
+    	while (isalpha(tch=toupper(*p))) {
+    		++p;
+    		++tpos;
+    		tseq.append((char)tolower(tch));
+    	}
+		//insert in tseq
+    	e_len=tpos-s_pos;
+    	q_pos=offset+qpos;
+		dif.init('I', e_len, q_pos, s_pos);
+		dif.evtbases.append(tseq.substr(-e_len));
+		if (reverse) {
+			revCompl(dif.evtbases);
+			dif.rloc=al.r_len-q_pos;
+		}
+		this->tdiffs.Add(dif);
+    	//qpos unchanged, offset+qpos is the location of the gap in qseq
+    	break;
+      case '+': //gap in tseq (insertion in tseq, deletion in qseq)
+    	s_pos=qpos;
+    	while (isalpha(qch=toupper(*p))) {
+    		++p;
+    		++qpos;
+    	}
+    	e_len=qpos-s_pos;
+    	q_pos=s_pos+offset;
+    	//these bases are missing in tseq (deletion)
+		dif.init('D', e_len, q_pos, tpos);
+		dif.evtbases.append(refseq.getSeq()+q_pos, e_len);
+		if (reverse) {
+			revCompl(dif.evtbases);
+			dif.rloc=al.r_len-q_pos-e_len;
+		}
+		this->tdiffs.Add(dif);
+    	//tpos unchanged, it is the location of the gap in tseq
+    	break;
+      case '~':
+    	GError("Error: spliced alignments not supported! at line:\n%s\n", line);
+    	break;
+      default:
+        GError("Error: unhandled event at %s in cs, line:\n%s\n",p,line);
+    }
+  } //interpret CS string;
+  //fill in context for differences:
+  for (int d=0;d<tdiffs.Count();d++) {
+	  tdiffs[d].setContext(tseq);
+	  if (reverse) {
+		revCompl(tdiffs[d].context);
+	    if (tdiffs[d].evt=='S') {
+		  //substitutions were kept on reverse to simplify merging
+		  //so now it's time to adjust that
+			revCompl(tdiffs[d].evtbases);
+			revCompl(tdiffs[d].evtsub);
+			tdiffs[d].rloc=al.r_len-tdiffs[d].rloc-tdiffs[d].evtbases.length();
+		}
+	  }
+  }
+  if (reverse) tdiffs.Reverse();
+  //parse cigar string to get the gaps
+  p=cigar;
+  int mbases = 0; //count "aligned" bases (includes mismatches)
+  qpos=0;
+  tpos=0;
+  GapData gap;
   // gpos = current genomic position (will end up as right coordinate on the genome)
   // rpos = read position (will end up as the length of the read)
   // cop = CIGAR operation, cl = operation length
-  int mbases = 0; //count "aligned" bases (includes mismatches)
-  int qpos = 0;  //should match length of aligned region of reference qseq, minus offset
-  int tpos = 0; //will end up with the length of target genome region being aligned
-  GapData gap;
-  char *p=cigar;
   while (*p != '\0') {
 	  int cl=0;
 	  if (!parseInt(p,cl)) GError(CIGAR_ERROR, line, p);
@@ -409,24 +592,31 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	   case 'I':
 		 //(gap in genomic (target) seq)
 		 // tpos is not advanced by this operation
-		 qpos+=cl;
-		 gap.pos=tpos;gap.len=cl;
+		 gap.pos= reverse? eff_t_len-tpos  : tpos;
+		 gap.len=cl;
 		 tgaps.Add(gap);
+		 qpos+=cl;
 		 break;
 	   case 'D':
-		 //deletion in reference sequence relative to the query (gap in query ref seq)
-		 tpos += cl;
-		 gap.pos=offset+qpos; gap.len=cl;
+		 //deletion in target sequence relative to the query (gap in query ref seq)
+		 gap.pos=offset+qpos;
+		 if (reverse) //actual location on qry ref for a reverse complement match:
+			  gap.pos=al.r_len-gap.pos;
+		 gap.len=cl;
 		 rgaps.Add(gap);
+		 //insertion in tseq
+		 tpos += cl;
 		 break;
 	   case 'N':
 		 // intron
 		 //special skip operation, not contributing to "edit distance",
-		 // printf("[%d-%d]", pos, pos + cl - 1); // Spans positions, No Coverage
-		 //   so num_mismatches is not updated
+		 //   so num_mismatches should not update
 		 tpos+=cl;
 		 //shouldn't really happen in genomic PAF
-		 gap.pos=offset+qpos; gap.len=cl;
+		 gap.pos=offset+qpos;
+		 if (reverse) //actual location on qry ref for a reverse complement match:
+			  gap.pos=al.r_len-gap.pos;
+		 gap.len=cl;
 		 rgaps.Add(gap);
 		 break;
 	   default:
@@ -434,69 +624,93 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	  } //switch cigar op
 	++p;
   } // interpret_CIGAR string
-  if (al.t_alnend-al.t_alnstart!=tpos)
-   	GError("Error: tseq alignment length mismatch (%d vs %d-%d) at line:%s\n",tpos, al.t_alnend, al.t_alnstart, line);
+  if (eff_t_len!=tpos)
+   	GError("Error: tseq alignment length mismatch (%d vs %d(%d-%d)) at line:%s\n",tpos, eff_t_len, al.t_alnend, al.t_alnstart, line);
   if (al.r_alnend-al.r_alnstart!=qpos)
    	GError("Error: ref alignment length mismatch (%d vs %d-%d) at line:%s\n",qpos, al.r_alnend, al.r_alnstart, line);
-
-  //interpret cs string to fill tseq
-  tseq="";
-  p=cs;
-  qpos=0; //ref query location in the alignment
-  tpos=0;
-  char tch=0,qch=0;
-  int q_pos=0;
-  while (*p != 0) {
-    char op=*p;
-    int cl=0;
-    p++;
-    switch (op) {
-      case ':':
-    	if (!parseInt(p,cl)) GError(CS_ERROR, line, p);
-    	tseq.appendmem(refseq.getSeq()+offset+qpos, cl);
-    	qpos+=cl;
-    	tpos+=cl;
-    	break;
-      case '*': //substitution
-	    tch=tolower(*p);++p;
-	    qch=tolower(*p);++p;
-	    q_pos=offset+qpos;
-	    if (qch!=refseq.getSeq()[q_pos]) {
-	    	GError("Error: base mismatch %c != qstr[%d] (%c) at line\n%s\n",
-	    			qch, q_pos, refseq.getSeq()[q_pos], line);
-	    }
-	    tseq.append((char)toupper(tch));
-	    ++qpos;
-	    ++tpos;
-   	    break;
-      case '-': //gap in qseq (insertion in q, deletion in tseq)
-    	while (isalpha(tch=tolower(*p))) {
-    		  ++p;
-    		  ++tpos;
-    		  tseq.append((char)toupper(tch));
-    	}
-    	//qpos unchanged, offset++qpos is the location of the gap in qseq
-    	break;
-      case '+': //gap in tseq (insertion in tseq, deletion in qseq)
-    	while (isalpha(qch=tolower(*p))) {
-    		  ++p;
-    		  ++qpos;
-    	}
-    	//tpos unchanged, it is the location of the gap in tseq
-    	break;
-      case '~':
-    	GError("Error: spliced alignments not supported! at line:\n%s\n", line);
-    	break;
-      default:
-        GError("Error: unhandled event at %s in cs, line:\n%s\n",p,line);
-    }
-  } //interpret CS string;
- }
-
-void printDebugAln(FILE* f, GList<GSeqAlign>& aa, int a) {
-  ++a;
-  fprintf(f,">[%d]DebugAlign (%d)\n", a, aa[a-1]->Count());
-  aa[a-1]->print(f,'=');
 }
 
+bool hpolyCheck(TDiffInfo& d) {
+	if (d.evtbases.length()>1) {
+		char c=d.evtbases[0];
+		for(int i=1;i<d.evtbases.length();i++)
+			if (c!=d.evtbases[i]) return false;
+	}
+	char ch=d.evtbases[0];
+	int p=d.context.length()/2;
+
+	GStr s(d.context);
+	s.upper();
+	GStr cseed(ch);
+	cseed.append(ch);cseed.append(ch);
+	p-=cseed.length(); if (p<0) p=0; //shouldn't happen
+	int l=s.index(cseed, p);
+	if (l>=0 && l<=p+1) return true;
+	return false;
+}
+
+bool mmotifCheck(TDiffInfo& d, GStr& stat) {
+	//for deletions, also search for methylation motifs in evtbases
+	if (d.evt=='D') {
+	  GStr r_ev(d.evtbases);
+	  revCompl(r_ev);
+	  int m=0;
+      while (metmot[m]!=NULL) {
+    	  if (d.evtbases.index(metmot[m])>=0 ||
+    		r_ev.index(metmot[m])>=0) {
+    		stat="motif ";
+    		stat.append(metmot[m]);
+    		return true;
+    	  }
+    	++m;
+	  }
+	}
+//now similarly for the context -- does it even make sense?
+	GStr ctx(d.context);
+	ctx.upper();
+	GStr r_c(ctx);
+	revCompl(r_c);
+	int m=0;
+	while (metmot[m]!=NULL) {
+  	  if (ctx.index(metmot[m])>=0 ||
+  			r_c.index(metmot[m])>=0) {
+  		  stat="motif ";
+  		  stat.append(metmot[m]);
+  		  stat.append(" within context");
+  		  return true;
+  	  }
+  	++m;
+    }
+	return false;
+}
+void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, const char* rqseq) {
+  double cov=((alninfo.r_alnend-alninfo.r_alnstart)*100.00)/alninfo.r_len;
+  fprintf(f, ">%s coverage:%.2f score=%d edit_distance=%d\n",tlabel.chars(), cov, alnscore, edist);
+  for (int i=0;i<tdiffs.Count();++i) {
+    TDiffInfo& di=tdiffs[i];
+    di.evtbases.upper();
+    //GStr r_c(di.context);
+    int aapos=(int)(di.rloc/3);
+    char aa=translateCodon(rqseq+3*aapos);
+    ++aapos;
+    GStr status=".";
+	//check for homopolymers at the location
+	if (hpolyCheck(di)) status="homopolymer detected";
+    mmotifCheck(di, status);
+    if (di.evt=='S')
+    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(), di.tloc, di.context.chars(), status.chars());
+    else {
+    	GStr fmt("%c\t%d\t%d(%c)\t");
+    	if (di.evt=='I') fmt.append(":%s\t%d\t%s\t%s\n");
+    			else fmt.append("%s:\t%d\t%s\t%s\n");
+    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, di.evtbases.chars(), di.tloc, di.context.chars(), status.chars());
+
+    }
+  }
+}
+
+void printDebugAln(FILE* f, GSeqAlign* a) {
+  fprintf(f,">DebugAlign (%d)\n", a->Count());
+  a->print(f,'=');
+}
 

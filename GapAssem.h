@@ -127,6 +127,7 @@ public:
   void printGappedSeq(FILE* f, int baseoffs=0);
   void printGappedSeq(int baseoffs=0) { printGappedSeq(stdout, baseoffs); }
   void printGappedFasta(FILE* f);
+  void printMFasta(FILE* f, int llen=60); //offset padded
   #ifdef ALIGN_COVERAGE_DATA
   void addCoverage(GASeq* s);
   #endif
@@ -448,13 +449,14 @@ class GSeqAlign :public GList<GASeq> {
   //  due to clipmax constraint, then nothing happens
   bool addAlign(GASeq* seq, GSeqAlign* omsa, GASeq* oseq);
   void finalize(); //delete inserts and reverse complement sequences as needed
-  void print(FILE* f, char c=0);
+  void print(FILE* f, char c=0); //debug printing one-line alignments
   void print() { print(stdout); }
   void removeColumn(int column);
   void freeMSA();
   void refineMSA(bool redo_ends=false);
       // find consensus, refine clipping, remove gap-columns
   void writeACE(FILE* f, const char* name);
+  void writeMSA(FILE* f, int linelen=60); //write as multi-FASTA (MAF?) file
   void writeInfo(FILE* f, const char* name);
 };
 
