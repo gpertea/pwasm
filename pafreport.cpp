@@ -474,8 +474,7 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	    	tdiffs.Last().evtsub.append((char)toupper(qch));
 	    }
 	    else {
-	    	s_pos= reverse ? eff_t_len-tpos : tpos;
-			dif.init('S', 1, q_pos, s_pos);
+			dif.init('S', 1, q_pos, tpos);
 			dif.evtbases.append((char)toupper(tch));
 			dif.evtsub.append((char)toupper(qch));
 			//keep substitutions on reverse to simplify merging
@@ -506,7 +505,6 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 		//insert in tseq
     	e_len=tpos-s_pos;
     	q_pos=offset+qpos;
-    	if (reverse) s_pos=eff_t_len-s_pos;
 		dif.init('I', e_len, q_pos, s_pos);
 		dif.evtbases.append(tseq.substr(-e_len));
 		if (reverse) {
@@ -525,7 +523,7 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
     	e_len=qpos-s_pos;
     	q_pos=s_pos+offset;
     	//these bases are missing in tseq (deletion)
-		dif.init('D', e_len, q_pos, (reverse ? eff_t_len-tpos : tpos));
+		dif.init('D', e_len, q_pos, tpos);
 		dif.evtbases.append(refseq.getSeq()+q_pos, e_len);
 		if (reverse) {
 			revCompl(dif.evtbases);
@@ -546,6 +544,8 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	  tdiffs[d].setContext(tseq);
 	  if (reverse) {
 		revCompl(tdiffs[d].context);
+		//also reverse the location so it shows as if tseq was reversed
+		tdiffs[d].tloc=tseq.length()-tdiffs[d].tloc;
 	    if (tdiffs[d].evt=='S') {
 		  //substitutions were kept on reverse to simplify merging
 		  //so now it's time to adjust that
@@ -627,7 +627,7 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	  } //switch cigar op
 	++p;
   } // interpret_CIGAR string
-  if (eff_t_len!=tpos)
+  if (eff_t_len!=tpos || tseq.length()!=tpos)
    	GError("Error: tseq alignment length mismatch (%d vs %d(%d-%d)) at line:%s\n",tpos, eff_t_len, al.t_alnend, al.t_alnstart, line);
   if (al.r_alnend-al.r_alnstart!=qpos)
    	GError("Error: ref alignment length mismatch (%d vs %d-%d) at line:%s\n",qpos, al.r_alnend, al.r_alnstart, line);
@@ -679,7 +679,7 @@ bool mmotifCheck(TDiffInfo& d, GStr& stat) {
   			r_c.index(metmot[m])>=0) {
   		  stat="motif ";
   		  stat.append(metmot[m]);
-  		  stat.append(" within context");
+  		  stat.append(" ctx");
   		  return true;
   	  }
   	++m;
