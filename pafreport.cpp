@@ -232,7 +232,7 @@ int main(int argc, char * const argv[]) {
   if (s.is_empty()) GError("Error: query sequence file (-r) is required!\n");
   GFastaFile rfa(s.chars());
   FastaSeq faseq;
-  FastaSeq* r=rfa.getFastaSeq(&faseq);
+  FastaSeq* r=rfa.getFastaSeq(&faseq, "\x01");
   if (r==NULL || faseq.getSeqLen()==0)
 	  GError("Error loading FASTA sequence from file %s !\n",s.chars());
   GASeq *refseq=new GASeq(faseq, true); //take over faseq data
