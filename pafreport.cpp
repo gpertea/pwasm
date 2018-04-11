@@ -28,7 +28,7 @@ bool verbose=false;
 //int rlineno=0;
 
 //methylation motifs:
-const char* const metmot[] = { "GATC", "GTAC", "CCAGG", "CCTGG", NULL };
+const char* const metmot[] = { "CCTGG", "CCAGG", "GATC", "GTAC", NULL };
 //look for these or a homopolymer around the indel/substitution event
 
 GHash<GASeq> seqs(false);
@@ -136,7 +136,7 @@ class PAFAlignment {
   int clip3; //amount to clip on the right end (0 for PAF on tseq)
   char reverse; //0, or 1 if this mapping is reverse complemented
   void parseErr(int fldno, const char* line);
-  void printDiffInfo(GStr& tlabel, FILE* f, const char* rqseq);
+  void printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq);
   PAFAlignment(GDynArray<char*>& t, AlnInfo& alni, GASeq& refseq, GStr& tseq, const char* line);
    //this also rebuilds tseq with the target sequence, by transforming refseq according to cs string
   ~PAFAlignment() { GFREE(seqname); GFREE(cs); GFREE(cigar); }
@@ -285,7 +285,7 @@ int main(int argc, char * const argv[]) {
    if (al.reverse) tlabel+='-';
    else tlabel+='+';
    if (freport) {
-        aln->printDiffInfo(tlabel, freport, refseq->getSeq());
+        aln->printDiffInfo(tlabel, freport, *refseq);
    }
    GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), al.r_alnstart);
    taseq->revcompl=aln->reverse;
@@ -633,26 +633,27 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
    	GError("Error: ref alignment length mismatch (%d vs %d-%d) at line:%s\n",qpos, al.r_alnend, al.r_alnstart, line);
 }
 
-bool hpolyCheck(TDiffInfo& d) {
+bool hpolyCheck(GASeq& refseq, TDiffInfo& d) {
 	if (d.evtbases.length()>1) {
 		char c=d.evtbases[0];
 		for(int i=1;i<d.evtbases.length();i++)
 			if (c!=d.evtbases[i]) return false;
 	}
 	char ch=d.evtbases[0];
-	int p=d.context.length()/2;
-
-	GStr s(d.context);
-	s.upper();
+	GStr rctx("",12);
+	int rloc=d.rloc-6;
+	int evtloc=6; //local position of event in rctx
+	if (rloc<0) { evtloc+=rloc; rloc=0; }
+    rctx.append(refseq.getSeq()+rloc, 12);
+	rctx.upper();
 	GStr cseed(ch);
-	cseed.append(ch);cseed.append(ch);
-	p-=cseed.length(); if (p<0) p=0; //shouldn't happen
-	int l=s.index(cseed, p);
-	if (l>=0 && l<=p+1) return true;
+	cseed.append(ch);cseed.append(ch);cseed.append(ch);
+	int l=rctx.index(cseed);
+	if (l>=0 && l<=evtloc && l+4>=evtloc) return true;
 	return false;
 }
 
-bool mmotifCheck(TDiffInfo& d, GStr& stat) {
+bool mmotifCheck(GASeq& refseq, TDiffInfo& d, GStr& stat) {
 	//for deletions, also search for methylation motifs in evtbases
 	if (d.evt=='D') {
 	  GStr r_ev(d.evtbases);
@@ -686,7 +687,7 @@ bool mmotifCheck(TDiffInfo& d, GStr& stat) {
     }
 	return false;
 }
-void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, const char* rqseq) {
+void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq) {
   double cov=((alninfo.r_alnend-alninfo.r_alnstart)*100.00)/alninfo.r_len;
   fprintf(f, ">%s coverage:%.2f score=%d edit_distance=%d\n",tlabel.chars(), cov, alnscore, edist);
   for (int i=0;i<tdiffs.Count();++i) {
@@ -694,12 +695,12 @@ void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, const char* rqseq) {
     di.evtbases.upper();
     //GStr r_c(di.context);
     int aapos=(int)(di.rloc/3);
-    char aa=translateCodon(rqseq+3*aapos);
+    char aa=translateCodon(refseq.getSeq()+3*aapos);
     ++aapos;
     GStr status=".";
 	//check for homopolymers at the location
-	if (hpolyCheck(di)) status="homopolymer detected";
-    mmotifCheck(di, status);
+	if (hpolyCheck(refseq, di)) status="homopolymer detected";
+    mmotifCheck(refseq, di, status);
     if (di.evt=='S')
     	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(), di.tloc+1, di.context.chars(), status.chars());
     else {
