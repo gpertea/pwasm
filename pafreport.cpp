@@ -663,7 +663,8 @@ bool hpolyCheck(TDiffInfo& d, GStr& rctx, int rctxloc) {
 	return false;
 }
 
-bool mmotifCheck(GStr& stat, GStr& rctx, int rctxloc) {
+//bool mmotifCheck(GStr& stat, GStr& rctx, int rctxloc) {
+bool mmotifCheck(GStr& stat, GStr& rctx) {
 	int m=0;
 	while (metmot[m]!=NULL) {
 	  int mpos=rctx.index(metmot[m]);
@@ -744,12 +745,13 @@ void predictImpact(GStr& txt, TDiffInfo& di, GStr& r_trseq, int r_offset) {
     		txt.append(' ');
     		txt.append(aa);txt.append(':');txt.append(maa);
     		if (maa=='.') {
-    			txt.append(" premature stop at AA");
+    			txt.append("; premature stop at AA");
     			txt.append(aapos);
     		}
     	}
     }
-  return;
+    if (txt.is_empty()) txt.append("synonymous");
+    return;
   }
   if (di.evt=='I') {
     //frame shift introducing?
@@ -759,12 +761,36 @@ void predictImpact(GStr& txt, TDiffInfo& di, GStr& r_trseq, int r_offset) {
   }
   else GError("Error: unrecognized editing event (%c)!\n", di.evt);
   //for I/D look for premature stop codons down the road
+  int aamodc=0;
+  GStr aa4("",4);
+  GStr maa4("",4);
   for (int i=0;i+2<modseq.length();i+=3) {
-	  if (translateCodon(modseq.chars()+i)=='.') {
+	  char aamod=translateCodon(modseq.chars()+i);
+	  if (aamod=='.') {
 		  txt.append("premature stop at AA");
 		  int aapos=1+(i+r_offset)/3;
 		  txt.append(aapos);
 		  break;
+	  }
+	  if (i>0 && aamodc<4) {
+		  ++aamodc;
+		  if (i+2<r_trseq.length()) {
+			  char aa=translateCodon(r_trseq.chars()+i);
+			  aa4.append(aa);
+		  }
+		  maa4.append(aamod);
+	  }
+  }
+  if (txt.is_empty()) {
+	  if (!aa4.is_empty() && !maa4.is_empty()) {
+		  txt.append("frame shift ");
+		  //char a0=translateCodon(r_trseq.chars()+3);
+		  //char a1=translateCodon(modseq.chars()+3);
+		  //txt.append(a0);txt.append(':');txt.append(a1);
+		  //txt.append("; ");
+		  txt.append(aa4);txt.append('+');
+		  txt.append(':');
+		  txt.append(maa4);txt.append('+');
 	  }
   }
 }
@@ -779,7 +805,7 @@ void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq) {
     int aapos=(int)(di.rloc/3);
     char aa=translateCodon(refseq.getSeq()+3*aapos);
     ++aapos;
-    GStr status=".";
+    GStr status;
 	//check for homopolymers at the location
 	GStr rctx("",9);
 	int rctxloc=getRefContext(refseq, di.rloc, rctx);
@@ -788,9 +814,13 @@ void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq) {
 	int r_trloc=3*(aapos-2); //start editing before
 	if (r_trloc<0) r_trloc=0;
 	GStr r_trseq(refseq.getSeq()+r_trloc, di.evtlen);
+
+    if (status.is_empty())
+    	mmotifCheck(status, rctx); // rctxloc);
 	GStr impact;
-	predictImpact(impact, di, r_trseq, r_trloc);
-    mmotifCheck(status, rctx, rctxloc);
+	if (status.is_empty())
+	  predictImpact(impact, di, r_trseq, r_trloc);
+	if (status.is_empty()) status=".";
     if (di.evt=='S')
     	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(),
     			di.tloc+1, di.context.chars(), rctx.chars(), status.chars(), impact.chars());
