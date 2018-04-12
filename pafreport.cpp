@@ -86,7 +86,7 @@ struct AlnInfo {
 struct TDiffInfo {
 	char evt; //event code: I=insertion, D=deletion, S=substitution
 	int evtlen; //event length (bases)
-	GStr evtbases; //bases inserted, deleted or as substituted
+	GStr evtbases; //bases inserted, deleted or substituted (by these bases)
 	GStr evtsub;  //for substitutions, the original base(s)
 	int rloc; //location of the event on ref query sequence
 	int tloc; //location of the event within the aligned target region, on the *aligned strand*
@@ -633,26 +633,51 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
    	GError("Error: ref alignment length mismatch (%d vs %d-%d) at line:%s\n",qpos, al.r_alnend, al.r_alnstart, line);
 }
 
-bool hpolyCheck(GASeq& refseq, TDiffInfo& d) {
+
+int getRefContext(GASeq& refseq, int rloc, GStr& rctx) {
+	//rctx must be empty already!
+	int ctxstart=rloc-4;
+	int evtloc=4; //local position of event start in rctx
+	if (ctxstart<0) { evtloc+=ctxstart; ctxstart=0; }
+	else if (ctxstart+8>=refseq.getSeqLen()) {
+		evtloc+=refseq.getSeqLen()-ctxstart-9;
+		ctxstart=refseq.getSeqLen()-9;
+	}
+    rctx.append(refseq.getSeq()+ctxstart, 9);
+	rctx.upper();
+	return evtloc;
+}
+
+bool hpolyCheck(TDiffInfo& d, GStr& rctx, int rctxloc) {
 	if (d.evtbases.length()>1) {
 		char c=d.evtbases[0];
 		for(int i=1;i<d.evtbases.length();i++)
 			if (c!=d.evtbases[i]) return false;
 	}
+	//reference context: 4 bases around rloc (total 9 bases)
 	char ch=d.evtbases[0];
-	GStr rctx("",12);
-	int rloc=d.rloc-6;
-	int evtloc=6; //local position of event in rctx
-	if (rloc<0) { evtloc+=rloc; rloc=0; }
-    rctx.append(refseq.getSeq()+rloc, 12);
-	rctx.upper();
 	GStr cseed(ch);
 	cseed.append(ch);cseed.append(ch);cseed.append(ch);
 	int l=rctx.index(cseed);
-	if (l>=0 && l<=evtloc && l+4>=evtloc) return true;
+	if (l>=0 && l<=rctxloc && l+cseed.length()>=rctxloc) return true;
 	return false;
 }
 
+bool mmotifCheck(GStr& stat, GStr& rctx, int rctxloc) {
+	int m=0;
+	while (metmot[m]!=NULL) {
+	  int mpos=rctx.index(metmot[m]);
+  	  if (mpos>=0) { //should we check if it's actually including rctxloc?
+  		  stat="motif ";
+  		  stat.append(metmot[m]);
+  		  return true;
+  	  }
+  	  ++m;
+    }
+	return false;
+}
+
+/*
 bool mmotifCheck(GASeq& refseq, TDiffInfo& d, GStr& stat) {
 	//for deletions, also search for methylation motifs in evtbases
 	if (d.evt=='D') {
@@ -687,6 +712,63 @@ bool mmotifCheck(GASeq& refseq, TDiffInfo& d, GStr& stat) {
     }
 	return false;
 }
+*/
+void predictImpact(GStr& txt, TDiffInfo& di, GStr& r_trseq, int r_offset) {
+  GStr modseq(r_trseq);
+  //apply the modification
+  if (di.evt=='S') {
+	//aminoacid substitution or stop codon introduced here?
+	//affected aminoacid locations
+	int aaofs=-1;
+    GStr orig;
+    GStr mod;
+    GVec<int> aamods;
+    for (int i=0;i<di.evtbases.length();++i) {
+    	if (toupper(modseq[di.rloc-r_offset+i])!=toupper(di.evtsub[i]))
+    		GError("Error: modseq[%d] not matching di.evtsub[%d] !\n", di.rloc-r_offset+i, i);
+    	modseq[di.rloc-r_offset+i]=di.evtbases[i];
+        int ao=(di.rloc-r_offset+i)/3;
+        if (ao!=aaofs) { //aa affected
+        	aaofs=ao;
+        	aamods.Add(ao);
+        }
+    }
+    //compare affected aminoacids
+    for (int i=0;i<aamods.Count();++i) {
+    	char aa=translateCodon(r_trseq.chars()+ (aamods[i] * 3));
+    	char maa=translateCodon(modseq.chars()+ (aamods[i] * 3));
+    	if (aa!=maa) {//not a synonymous codon
+    		txt.append("AA");
+    		int aapos=1+di.rloc/3;
+    		txt.append(aapos);
+    		txt.append(' ');
+    		txt.append(aa);txt.append(':');txt.append(maa);
+    		if (maa=='.') {
+    			txt.append(" premature stop at AA");
+    			txt.append(aapos);
+    		}
+    	}
+    }
+  return;
+  }
+  if (di.evt=='I') {
+    //frame shift introducing?
+    modseq.insert(di.evtbases, di.rloc-r_offset); //check if it's done right!
+  } else if (di.evt=='D') {
+	modseq.cut(di.rloc-r_offset, di.evtlen); //check if it's done right!
+  }
+  else GError("Error: unrecognized editing event (%c)!\n", di.evt);
+  //for I/D look for premature stop codons down the road
+  for (int i=0;i+2<modseq.length();i+=3) {
+	  if (translateCodon(modseq.chars()+i)=='.') {
+		  txt.append("premature stop at AA");
+		  int aapos=1+(i+r_offset)/3;
+		  txt.append(aapos);
+		  break;
+	  }
+  }
+}
+
 void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq) {
   double cov=((alninfo.r_alnend-alninfo.r_alnstart)*100.00)/alninfo.r_len;
   fprintf(f, ">%s coverage:%.2f score=%d edit_distance=%d\n",tlabel.chars(), cov, alnscore, edist);
@@ -699,16 +781,25 @@ void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq) {
     ++aapos;
     GStr status=".";
 	//check for homopolymers at the location
-	if (hpolyCheck(refseq, di)) status="homopolymer detected";
-    mmotifCheck(refseq, di, status);
+	GStr rctx("",9);
+	int rctxloc=getRefContext(refseq, di.rloc, rctx);
+	if (hpolyCheck(di, rctx, rctxloc)) status="homopolymer";
+	//impact if this edit were applied
+	int r_trloc=3*(aapos-2); //start editing before
+	if (r_trloc<0) r_trloc=0;
+	GStr r_trseq(refseq.getSeq()+r_trloc, di.evtlen);
+	GStr impact;
+	predictImpact(impact, di, r_trseq, r_trloc);
+    mmotifCheck(status, rctx, rctxloc);
     if (di.evt=='S')
-    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(), di.tloc+1, di.context.chars(), status.chars());
+    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(),
+    			di.tloc+1, di.context.chars(), rctx.chars(), status.chars(), impact.chars());
     else {
     	GStr fmt("%c\t%d\t%d(%c)\t");
-    	if (di.evt=='I') fmt.append(":%s\t%d\t%s\t%s\n");
-    			else fmt.append("%s:\t%d\t%s\t%s\n");
-    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, di.evtbases.chars(), di.tloc+1, di.context.chars(), status.chars());
-
+    	if (di.evt=='I') fmt.append(":%s\t%d\t%s\t%s\t%s\t%s\n");
+    			    else fmt.append("%s:\t%d\t%s\t%s\t%s\t%s\n");
+    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, di.evtbases.chars(), di.tloc+1, di.context.chars(),
+    			rctx.chars(), status.chars(), impact.chars());
     }
   }
 }
