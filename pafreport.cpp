@@ -748,7 +748,7 @@ void predictImpact(GStr& txt, TDiffInfo& di, GStr& r_trseq, int r_offset) {
     		txt.append(aa);txt.append(':');txt.append(maa);
     		++cdiff;
     		if (maa=='.') {
-    			txt.append("|premature stop ");
+    			txt.append("|premature stop at AA");
     			txt.append(aapos);
     		}
     	}
