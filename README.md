@@ -17,3 +17,15 @@ This project depends on my gclib source. The build steps from the github reposit
     make release
     
 This should build the `pafreport` binary.
+
+
+# Usage
+For aligning a reference CDS (bacterial gene sequence, cds.fa) vs. a set of Nanopore assemblies (asms.fa):
+    
+    minimap2 -x map-ont -d asms.mmi asms.fa #build the minimizer index (optional)
+    minimap2 -c --cs -r1000 -P -x map-ont asms.mmi cds.fa > mappings.paf
+
+Then pafreport can be run on the resulting PAF file:
+
+    pafreport -r cds.fa mappings.paf -o report.txt
+
