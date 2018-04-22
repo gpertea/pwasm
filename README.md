@@ -7,7 +7,7 @@ The primary use case is when a known bacterial gene sequence (CDS) is aligned to
 In this case the report will include an entry for each assembly detailing the gene sequence coverage and the context for each
 putative mutation event, including the downstream consequences of the mutation (aminoacid changes, premature stop codon).
 
-#Building
+# Building
 
 This project depends on my gclib source. The build steps from the github repository are like this:
     
