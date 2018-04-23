@@ -5,37 +5,41 @@
 #include "GStr.h"
 #include "GHash.hh"
 #include "GList.hh"
+#include "GFaSeqGet.h"
 #include "GapAssem.h"
 #include "codons.h"
 
 #define USAGE "Usage:\n\
- pafreport <paf_with_cg_cs> -r <refseq.fa> \n\
-    [-o <diff_report.dfa>][-w <outfile.mfa>]\n\
+ pafreport <paf_with_cg_cs> -r <refseq.fa> [-s <summary.txt>]\n\
+    [-o <diff_report.dfa>][-w <outfile.mfa>] [-G|-F|-C|-N]\n\
     \n\
-   <paf_with_cg_cs> is the input PAF file where a single query was aligned\n\
-      to many (larger) target sequences using minimap2 --cs -P\n\
-   -r a fasta file with the query sequence to use as reference (required)\n\
-   -o write difference data for each target sequence into <diff_report.dfa>\n\
-   -w write MSA as multifasta into <outfile.mfa>\n"
+   <paf_with_cg_cs> is the input PAF file with high quality query sequence(s)\n\
+      aligned to many target sequences using minimap2 --cs\n\
+   -r provide the fasta file with query sequence(s) (required)\n\
+   -o write difference data for each alignment into <diff_report.dfa>\n\
+   -s write summary counts into <summary.txt>\n\
+   -w write MSA as multifasta into <outfile.mfa>\n\
+   -G gene CDS analysis mode (default for query<100K; assumes -C)\n\
+   -F full genome alignment mode (default for query>100Kb; assumes -N)\n\
+   -C perform codon impact analysis\n\
+   -N skip codon impact analysis\n"
 
 #define LOG_MSG_CLIPMAX "Overlap between %s and target %s rejected due to clipmax=%4.2f constraint.\n"
 #define LOG_MSG_OVLCLIP "Overlap between %s and %s invalidated by the %dnt clipping of %s at %d' end.\n"
 //-------- global variables
 bool debugMode=false;
 bool removeConsGaps=false;
-//char* ref_prefix=NULL;
+//PAF report options:
+bool fullgenomeAlns=false; //full genome vs genome alignments, all query-target alignments are retained
+                     //otherwise only first query-target alignment is processed
+bool skipCodAn=false; //skip codon impact assessments (-N/-C)?
+
 bool verbose=false;
-//int rlineno=0;
 
 //methylation motifs:
+//TODO: these should be loaded from an external file
 const char* const metmot[] = { "CCTGG", "CCAGG", "GATC", "GTAC", NULL };
 //look for these or a homopolymer around the indel/substitution event
-
-GHash<GASeq> seqs(false);
-
-//list of collected MSAs
-//GList<GSeqAlign> alns(true, true,false);
-                 // sorted, free element, not unique
 
 void printDebugAln(FILE* f, GSeqAlign* a);
 
@@ -161,13 +165,27 @@ char* endSpToken(char* str) {
 //========================================================
 int main(int argc, char * const argv[]) {
  //GArgs args(argc, argv, "DGvd:o:c:");
- GArgs args(argc, argv, "DGvd:p:r:o:m:w:c:");
+ GArgs args(argc, argv, "DGFCNvd:p:r:o:m:w:c:s:");
  int e;
- if ((e=args.isError())>0)
-    GError("%s\nInvalid argument: %s\n", USAGE, argv[e]);
+ if ((e=args.isError())>0) {
+    GMessage("%s\nInvalid argument: %s\n", USAGE, argv[e]);
+    exit(1);
+ }
  if (args.getOpt('h')!=NULL) GError("%s\n", USAGE);
  debugMode=(args.getOpt('D')!=NULL);
- removeConsGaps=(args.getOpt('G')==NULL);
+ //removeConsGaps=(args.getOpt('G')==NULL);
+ fullgenomeAlns=(args.getOpt('F')==NULL);
+ bool geneCDSalns=args.getOpt('G');
+ if (fullgenomeAlns && geneCDSalns) {
+	 GMessage("%s Error: cannot use both -G and -F!\n",USAGE);
+	 exit(1);
+ }
+ bool forceCoding=(args.getOpt('C')!=NULL);
+ bool forceNonCoding=(args.getOpt('N')!=NULL);
+ if (forceCoding && forceNonCoding) {
+	 GMessage("%s Error: cannot use both -N and -C!\n",USAGE);
+	 exit(1);
+ }
  verbose=(args.getOpt('v')!=NULL);
  if (debugMode) {
 	  verbose=true;
@@ -211,13 +229,6 @@ int main(int argc, char * const argv[]) {
           }
 
       } //clipmax option
-  GStr msafile=args.getOpt('w');
-  FILE* fmsa=NULL;
-  if (!msafile.is_empty()) {
-     fmsa=fopen(msafile, "w");
-     if (fmsa==NULL)
-        GError("Cannot open file %s for writing!\n",msafile.chars());
-  }
 
   GStr outfile=args.getOpt('o');
   FILE* freport=NULL;
@@ -229,24 +240,57 @@ int main(int argc, char * const argv[]) {
    else freport=stdout;
   //************************************************
   s=args.getOpt('r');
-  if (s.is_empty()) GError("Error: query sequence file (-r) is required!\n");
+  if (s.is_empty()) GError("Error: query FASTA file (-r) is required!\n");
+  int64 fsize=fileSize(s.chars());
+  if (fsize<=0) GError("Error: invalid FASTA file %s !\n", s.chars());
+  GFastaDb qfasta(s.chars(), false);
+  if (!fullgenomeAlns && !geneCDSalns && fsize>120000) {
+		  fullgenomeAlns=true;
+  }
+  skipCodAn=(fullgenomeAlns || forceNonCoding);
+  if (!skipCodAn && !forceCoding && fsize>120000) {
+	  skipCodAn=true;
+  }
+  GStr msafile=args.getOpt('w');
+  FILE* fmsa=NULL;
+  if (!msafile.is_empty()) {
+	 if (fullgenomeAlns) {
+		 GMessage("%s Error: cannot generate MSA for -G option!\n",USAGE);
+		 exit(1);
+	 }
+     fmsa=fopen(msafile, "w");
+     if (fmsa==NULL)
+        GError("Cannot open file %s for writing!\n",msafile.chars());
+  }
+  s=args.getOpt('s');
+  GHash<int> alnpairs(true); //key is q_name+'~'+t_name ; only used if !fullgenomeAlns
+
+  GHash<GASeq> rseqs(false); //reference query seqs
+  GList<GSeqAlign> alns(true,   true, false);
+                     // sorted, free, not unique
+  /*
   GFastaFile rfa(s.chars());
   FastaSeq faseq;
   FastaSeq* r=rfa.getFastaSeq(&faseq, "\x01");
   if (r==NULL || faseq.getSeqLen()==0)
 	  GError("Error loading FASTA sequence from file %s !\n",s.chars());
   GASeq *refseq=new GASeq(faseq, true); //take over faseq data
+
+  refseq->setFlag(GA_FLAG_IS_REF);
+  rseqs.Add(refseq->getId(),refseq);
+
   refseq->allupper();
   GASeq refseq_rc(*refseq);
   refseq_rc.reverseComplement();
+  */
   GLineReader* linebuf=new GLineReader(inf);
   char* line;
   //alns.setSorted(compareOrdnum);
-  refseq->setFlag(GA_FLAG_IS_REF);
-  seqs.Add(refseq->getId(),refseq);
   GSeqAlign *refMSA=NULL; //this will be the final MSA
   int numalns=0;
   GDynArray<char*> t(24);
+  GASeq *refseq=NULL;
+  GASeq *refseq_rc=NULL;
   while ((line=linebuf->getLine())!=NULL) {
    if (line[0]=='#') continue;
    bool firstRefAln=false;
@@ -266,15 +310,41 @@ int main(int argc, char * const argv[]) {
    if (al.r_len!=refseq->getSeqLen())
 	    GError("Error: ref seq len in this PAF line (%d) differs from loaded sequence length(%d)!\n%s\n",
 		     al.r_len, refseq->getSeqLen(),lstr.chars());
-   if (seqs.Find(al.t_id)) {
-        GMessage("Warning: target sequence %s alignment already seen before, ignoring other alignments\n",
-                             al.t_id);
-        continue;
+   GStr qtpair(al.r_id);
+   if (!fullgenomeAlns) {
+	   qtpair.append('~');
+	   qtpair.append(al.t_id);
+	   int* vcount=alnpairs.Find(qtpair.chars());
+	   if (vcount==NULL) {
+		   alnpairs.Add(qtpair.chars(), new int(0));
+	   }
+	   else {
+         ++(*vcount);
+	     if (*vcount==1)
+	       	GMessage("Warning: alignment %s to %s already seen, ignoring \n",
+	                            al.r_id, al.t_id);
+	     continue;
+	   }
    }
    //-- load the current alignment
    ++numalns;
+   //retrieve current refseq
+   if (refseq==NULL || strcmp(refseq->name, al.r_id)!=0) {
+      delete refseq;
+      delete refseq_rc;
+      GFaSeqGet* seq=qfasta.fetch(al.r_id);
+      if (seq==NULL) GError("Error: could not retrieve sequence for %s !\n",al.r_id);
+      refseq=new GASeq(al.r_id, NULL, seq->seq(), seq->getseqlen());
+      refseq->setFlag(GA_FLAG_IS_REF);
+      refseq->allupper();
+      refseq_rc=new GASeq(*refseq);
+      refseq_rc->reverseComplement();
+   }
    GASeq *r_seq = refseq;
-   if (al.reverse) r_seq=&refseq_rc;
+   if (al.reverse) {
+
+	   r_seq=refseq_rc;
+   }
 
    GStr tseq("",al.t_alnend-al.t_alnstart+2);
    PAFAlignment* aln=new PAFAlignment(t, al, *r_seq, tseq, lstr.chars());
@@ -353,13 +423,7 @@ int main(int argc, char * const argv[]) {
      fprintf(stderr,">MSA (%d)\n",refMSA->Count());
      refMSA->print(stderr, 'v');
      }
-   if (fmsa) {//write a real ACE file
-	 /*
-     GStr ctgname;
-     ctgname.format("AorContig%d",i+1);
-     a->writeACE(outf, ctgname.chars());
-     a->freeMSA(); //free MSA and seq memory
-     */
+   if (fmsa) {
      refMSA->writeMSA(fmsa);
      fclose(fmsa);
    }
