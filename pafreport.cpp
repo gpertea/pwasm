@@ -140,7 +140,7 @@ class PAFAlignment {
   int clip3; //amount to clip on the right end (0 for PAF on tseq)
   char reverse; //0, or 1 if this mapping is reverse complemented
   void parseErr(int fldno, const char* line);
-  void printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq);
+  void printDiffInfo(GStr& rlabel, GStr& tlabel, FILE* f, GASeq& refseq);
   PAFAlignment(GDynArray<char*>& t, AlnInfo& alni, GASeq& refseq, GStr& tseq, const char* line);
    //this also rebuilds tseq with the target sequence, by transforming refseq according to cs string
   ~PAFAlignment() { GFREE(seqname); GFREE(cs); GFREE(cigar); }
@@ -255,7 +255,7 @@ int main(int argc, char * const argv[]) {
   FILE* fmsa=NULL;
   if (!msafile.is_empty()) {
 	 if (fullgenomeAlns) {
-		 GMessage("%s Error: cannot generate MSA for -G option!\n",USAGE);
+		 GMessage("%s Error: can only generate MSA for -G mode!\n",USAGE);
 		 exit(1);
 	 }
      fmsa=fopen(msafile, "w");
@@ -265,9 +265,10 @@ int main(int argc, char * const argv[]) {
   s=args.getOpt('s');
   GHash<int> alnpairs(true); //key is q_name+'~'+t_name ; only used if !fullgenomeAlns
 
-  GHash<GASeq> rseqs(false); //reference query seqs
-  GList<GSeqAlign> alns(true,   true, false);
-                     // sorted, free, not unique
+  GHash<GASeq> rseqs(false); //query seqs to use as reference for MSAs
+  GList<GSeqAlign> msalns(false,   true, false);
+                      // unsorted, free, not unique
+  //msalns.setSorted(compareOrdnum);
   /*
   GFastaFile rfa(s.chars());
   FastaSeq faseq;
@@ -285,7 +286,6 @@ int main(int argc, char * const argv[]) {
   */
   GLineReader* linebuf=new GLineReader(inf);
   char* line;
-  //alns.setSorted(compareOrdnum);
   GSeqAlign *refMSA=NULL; //this will be the final MSA
   int numalns=0;
   GDynArray<char*> t(24);
@@ -311,7 +311,7 @@ int main(int argc, char * const argv[]) {
 	    GError("Error: ref seq len in this PAF line (%d) differs from loaded sequence length(%d)!\n%s\n",
 		     al.r_len, refseq->getSeqLen(),lstr.chars());
    GStr qtpair(al.r_id);
-   if (!fullgenomeAlns) {
+   if (!fullgenomeAlns) { //gene CDS mode
 	   qtpair.append('~');
 	   qtpair.append(al.t_id);
 	   int* vcount=alnpairs.Find(qtpair.chars());
@@ -329,33 +329,42 @@ int main(int argc, char * const argv[]) {
    //-- load the current alignment
    ++numalns;
    //retrieve current refseq
-   if (refseq==NULL || strcmp(refseq->name, al.r_id)!=0) {
-      delete refseq;
+   if (refseq==NULL || strcmp(refseq->name(), al.r_id)!=0) {
       delete refseq_rc;
-      GFaSeqGet* seq=qfasta.fetch(al.r_id);
-      if (seq==NULL) GError("Error: could not retrieve sequence for %s !\n",al.r_id);
-      refseq=new GASeq(al.r_id, NULL, seq->seq(), seq->getseqlen());
-      refseq->setFlag(GA_FLAG_IS_REF);
-      refseq->allupper();
+      //check if this refseq was seen before
+      GASeq* vrseq=rseqs.Find(al.r_id);
+      if (vrseq!=NULL) {
+        refseq=vrseq;
+      }
+      else {
+        GFaSeqGet* seq=qfasta.fetch(al.r_id);
+        if (seq==NULL) GError("Error: could not retrieve sequence for %s !\n",al.r_id);
+        refseq=new GASeq(al.r_id, NULL, seq->seq(), seq->getseqlen());
+        refseq->setFlag(GA_FLAG_IS_REF);
+        refseq->allupper();
+      }
       refseq_rc=new GASeq(*refseq);
       refseq_rc->reverseComplement();
    }
    GASeq *r_seq = refseq;
-   if (al.reverse) {
-
-	   r_seq=refseq_rc;
-   }
-
-   GStr tseq("",al.t_alnend-al.t_alnstart+2);
+   if (al.reverse)
+      r_seq=refseq_rc;
+   GStr tseq("", al.t_alnend-al.t_alnstart+2);
    PAFAlignment* aln=new PAFAlignment(t, al, *r_seq, tseq, lstr.chars());
    //this also fills tseq and sets aln->offset to the tseq mapping offset on refseq
    GStr tlabel(al.t_id, 21);
+   GStr rlabel(al.r_id, 21);
+   if (fullgenomeAlns) {
+	   rlabel+=':';
+	   rlabel+=al.r_alnstart;
+	   rlabel+='-';rlabel+=al.r_alnend;
+   }
    tlabel+=":";tlabel+=al.t_alnstart;tlabel+='-';
    tlabel+=al.t_alnend;
    if (al.reverse) tlabel+='-';
    else tlabel+='+';
    if (freport) {
-        aln->printDiffInfo(tlabel, freport, *refseq);
+        aln->printDiffInfo(rlabel, tlabel, freport, *refseq);
    }
    GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), al.r_alnstart);
    taseq->revcompl=aln->reverse;
@@ -369,38 +378,37 @@ int main(int argc, char * const argv[]) {
    else {
 	   firstRefAln=true;
    }
-   //once a gap, always a gap
-   //propagate gaps in ref seq from the current alignment
-   for (int g=0;g<aln->rgaps.Count();++g) {
-	   GapData &gd=aln->rgaps[g];
-	   rseq->setGap(gd.pos, gd.len);
-   }
-   //propagate gaps in target sequence as well
-   for (int g=0;g<aln->tgaps.Count();++g) {
-	   GapData &gd=aln->tgaps[g];
-       taseq->setGap(gd.pos, gd.len);
-   }
-   /*
-   if (taseq->revcompl==1) {
-         taseq->reverseGaps();
-   }
-   */
-   GSeqAlign *newmsa=new GSeqAlign(rseq, taseq);
-   //this also sets rseq->msa and taseq->msa to newmsa
-   if (firstRefAln) { //first alignment with refseq so rseq==refseq
-	     //newmsa->incOrd();
-	     newmsa->ordnum=numalns;
-	     //alns.Add(newmsa);
-	     refMSA=newmsa;
-   }
-   else { // rseq != refseq, but an instance of refseq in this current aln
-	    //incrementally add this alignment, as a MSA, to existing MSA,
-	    //propagating gaps through rseq instance
-	   refseq->msa->addAlign(refseq, newmsa, rseq);
-	   delete newmsa; //incorporated, no longer needed
-   }
-
-   seqs.Add(al.t_id,taseq);
+   if (fmsa!=NULL) {
+	   //once a gap, always a gap
+	   //propagate gaps in ref seq from the current alignment
+	   for (int g=0;g<aln->rgaps.Count();++g) {
+		   GapData &gd=aln->rgaps[g];
+		   rseq->setGap(gd.pos, gd.len);
+	   }
+	   //propagate gaps in target sequence as well
+	   for (int g=0;g<aln->tgaps.Count();++g) {
+		   GapData &gd=aln->tgaps[g];
+		   taseq->setGap(gd.pos, gd.len);
+	   }
+	   GSeqAlign *newmsa=new GSeqAlign(rseq, taseq);
+	   //this also sets rseq->msa and taseq->msa to newmsa
+	   if (firstRefAln) { //first alignment with refseq so rseq==refseq
+			 //newmsa->incOrd();
+			 newmsa->ordnum=numalns;
+			 msalns.Add(newmsa);
+			 refMSA=newmsa;
+	   }
+	   else { // rseq != refseq, but an instance of refseq in this current aln
+			//incrementally add this alignment, as a MSA, to existing MSA,
+			//propagating gaps through rseq instance
+		   refseq->msa->addAlign(refseq, newmsa, rseq);
+		   refMSA=refseq->msa;
+		   delete newmsa; //incorporated, no longer needed
+	   }
+   } //MSA constructions
+//   if (!fullgenomeAlns) {
+//	   rseqs.Add(al.r_id, )
+//   }
    // new pairwise alignment added to MSA
    // debug print the progressive alignment
    /*
@@ -428,11 +436,10 @@ int main(int argc, char * const argv[]) {
      fclose(fmsa);
    }
  //} // for each MSA cluster
-  // oooooooooo D O N E oooooooooooo
-  //alns.Clear();
-  delete refMSA;
-  seqs.Clear();
-
+ // --------- D O N E --------
+  msalns.Clear();
+  //delete refMSA;
+  rseqs.Clear();
   //fflush(outf);
   if (freport!=stdout) fclose(freport);
   if (inf!=stdin) fclose(inf);
@@ -697,7 +704,6 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
    	GError("Error: ref alignment length mismatch (%d vs %d-%d) at line:%s\n",qpos, al.r_alnend, al.r_alnstart, line);
 }
 
-
 int getRefContext(GASeq& refseq, int rloc, GStr& rctx) {
 	//rctx must be empty already!
 	int ctxstart=rloc-4;
@@ -862,9 +868,10 @@ void predictImpact(GStr& txt, TDiffInfo& di, GStr& r_trseq, int r_offset) {
   }
 }
 
-void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq) {
+void PAFAlignment::printDiffInfo(GStr& rlabel, GStr& tlabel, FILE* f, GASeq& refseq) {
   double cov=((alninfo.r_alnend-alninfo.r_alnstart)*100.00)/alninfo.r_len;
-  fprintf(f, ">%s coverage:%.2f score=%d edit_distance=%d\n",tlabel.chars(), cov, alnscore, edist);
+  fprintf(f, ">%s--%s coverage:%.2f score=%d edit_distance=%d\n",rlabel.chars(),
+		  tlabel.chars(), cov, alnscore, edist);
   for (int i=0;i<tdiffs.Count();++i) {
 	TDiffInfo& di=tdiffs[i];
 	di.evtbases.upper();
@@ -881,13 +888,16 @@ void PAFAlignment::printDiffInfo(GStr& tlabel, FILE* f, GASeq& refseq) {
 	int r_trloc=3*(aapos-2); //start editing before
 	if (r_trloc<0) r_trloc=0;
 	GStr r_trseq(refseq.getSeq()+r_trloc, di.evtlen);
-	int mmatchidx=0;
+	//int mmatchidx=0;
 	if (status.is_empty())
-		mmatchidx=mmotifCheck(status, rctx); // rctxloc);
+		//mmatchidx=
+		mmotifCheck(status, rctx); // rctxloc);
 	GStr impact;
 	//if (status.is_empty() || (mmatchidx>0 && strlen(metmot[mmatchidx-1])<5))
+	if (!skipCodAn)
 	    predictImpact(impact, di, r_trseq, r_trloc);
 	if (status.is_empty()) status="[unknown]";
+	//TODO: avoid printing very long di.context, di.evt/di.evtsub
 	if (di.evt=='S')
     	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(),
     			di.tloc+1, di.context.chars(), rctx.chars(), status.chars(), impact.chars());
