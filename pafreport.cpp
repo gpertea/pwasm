@@ -89,15 +89,16 @@ struct AlnInfo {
 
 struct TDiffInfo {
 	char evt; //event code: I=insertion, D=deletion, S=substitution
-	int evtlen; //event length (bases)
-	GStr evtbases; //bases inserted, deleted or substituted (by these bases)
-	GStr evtsub;  //for substitutions, the original base(s)
+	int evtlen; //event length (bases; 0 for deletion)
+	GStr evtbases; //bases inserted, deleted or newly substituted (by these bases)
+	GStr evtsub;  //for substitutions only: the original base(s)
 	int rloc; //location of the event on ref query sequence
+	//TODO: tloc must be converted to GLOBAL coordinates, on the full target sequence
 	int tloc; //location of the event within the aligned target region, on the *aligned strand*
-	GStr context; //5 bases before and after the event (at least 11 bases)
+	GStr tctx; //target context: event+5 bases before and after the event (at least 10 bases)
 	char flags; //indicates if a methylation motif or a homopolymer was found in the context
 	TDiffInfo(char e=0):evt(e), evtlen(0), evtbases("",8), evtsub("",8), rloc(0),tloc(0),
-			context("",18), flags(0) { }
+			tctx("",18), flags(0) { }
 	void init(char e, int len, int rpos, int tpos) {
 		evt=e;
 		evtlen=len;
@@ -105,17 +106,17 @@ struct TDiffInfo {
 		tloc=tpos;
 		evtbases.clear(8);
 		evtsub.clear(8);
-		context.clear(18);
+		tctx.clear(18);
 		flags=0;
 	}
-	void setContext(GStr& tseq) {
+	void setTContext(GStr& tseq) {
 		 int tc_start=tloc-5;
 		 if (tc_start<0) tc_start=0;
 		 int evt_len=evtlen;
 		 if (evt=='D') evt_len=0;
 		 int tc_end=tloc+evt_len+5;
 		 if (tc_end>=tseq.length()) tc_end=tseq.length()-1;
-		 context=tseq.substr(tc_start, tc_end-tc_start);
+		 tctx=tseq.substr(tc_start, tc_end-tc_start);
 	}
     bool operator<(TDiffInfo o) {
     	return (rloc<o.rloc);
@@ -174,8 +175,8 @@ int main(int argc, char * const argv[]) {
  if (args.getOpt('h')!=NULL) GError("%s\n", USAGE);
  debugMode=(args.getOpt('D')!=NULL);
  //removeConsGaps=(args.getOpt('G')==NULL);
- fullgenomeAlns=(args.getOpt('F')==NULL);
- bool geneCDSalns=args.getOpt('G');
+ fullgenomeAlns=(args.getOpt('F')!=NULL);
+ bool geneCDSalns=(args.getOpt('G')!=NULL);
  if (fullgenomeAlns && geneCDSalns) {
 	 GMessage("%s Error: cannot use both -G and -F!\n",USAGE);
 	 exit(1);
@@ -298,18 +299,15 @@ int main(int argc, char * const argv[]) {
    int numt=strsplit(line, t, '\t');
    if (numt<15)
 	   GError("Error: invalid PAF fline (num. fields=%d):\n%s\n", numt,lstr.chars());
-   if (strcmp(t[0], refseq->getId())!=0)
-	   GError("Error: expected reference name (%s) in PAF line, but found %s instead!\n",
-	    		  refseq->getId(),t[0]);
+   //if (strcmp(t[0], refseq->getId())!=0)
+   //   GError("Error: expected reference name (%s) in PAF line, but found %s instead!\n",
+   //    		  refseq->getId(),t[0]);
    AlnInfo al(*t[4], t[0], t[1], t[2], t[3], t[5], t[6], t[7], t[8]);
    if (strcmp(al.r_id, al.t_id)==0) {
 	  if (verbose) GMessage("Skipping alignment of qry seq to itself.\n");
       continue; //skip redundant inclusion of reference as its own child
    }
 
-   if (al.r_len!=refseq->getSeqLen())
-	    GError("Error: ref seq len in this PAF line (%d) differs from loaded sequence length(%d)!\n%s\n",
-		     al.r_len, refseq->getSeqLen(),lstr.chars());
    GStr qtpair(al.r_id);
    if (!fullgenomeAlns) { //gene CDS mode
 	   qtpair.append('~');
@@ -346,6 +344,11 @@ int main(int argc, char * const argv[]) {
       refseq_rc=new GASeq(*refseq);
       refseq_rc->reverseComplement();
    }
+
+   if (al.r_len!=refseq->getSeqLen())
+	    GError("Error: ref seq len in this PAF line (%d) differs from loaded sequence length(%d)!\n%s\n",
+		     al.r_len, refseq->getSeqLen(),lstr.chars());
+
    GASeq *r_seq = refseq;
    if (al.reverse)
       r_seq=refseq_rc;
@@ -438,6 +441,7 @@ int main(int argc, char * const argv[]) {
  //} // for each MSA cluster
  // --------- D O N E --------
   msalns.Clear();
+  delete refseq_rc;
   //delete refMSA;
   rseqs.Clear();
   //fflush(outf);
@@ -612,9 +616,9 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
   } //interpret CS string;
   //fill in context for differences:
   for (int d=0;d<tdiffs.Count();d++) {
-	  tdiffs[d].setContext(tseq);
+	  tdiffs[d].setTContext(tseq);
 	  if (reverse) {
-		revCompl(tdiffs[d].context);
+		revCompl(tdiffs[d].tctx);
 		//also reverse the location so it shows as if tseq was reversed
 		tdiffs[d].tloc=tseq.length()-tdiffs[d].tloc;
 	    if (tdiffs[d].evt=='S') {
@@ -897,15 +901,40 @@ void PAFAlignment::printDiffInfo(GStr& rlabel, GStr& tlabel, FILE* f, GASeq& ref
 	if (!skipCodAn)
 	    predictImpact(impact, di, r_trseq, r_trloc);
 	if (status.is_empty()) status="[unknown]";
-	//TODO: avoid printing very long di.context, di.evt/di.evtsub
+	GStr tcontext(di.tctx);
+	const int MAX_EVLEN=12; //maximum event length to display
+	if (tcontext.length()>10+MAX_EVLEN) {
+		int dlen=tcontext.length()-10;
+		tcontext=di.tctx.substr(0,5);
+		tcontext.append('[');
+		tcontext.append(dlen);
+		tcontext.append(']');
+		tcontext.append(di.tctx.substr(-5));
+	}
+	GStr evtbases(di.evtbases);
+	if (evtbases.length()>MAX_EVLEN) {
+		int dlen=evtbases.length();
+		evtbases="[";
+		evtbases.append(dlen);
+		evtbases.append(']');
+	}
+	GStr evtsub(di.evtsub);
+	if (evtsub.length()>MAX_EVLEN) {
+		int dlen=evtsub.length();
+		evtsub="[";
+		evtsub.append(dlen);
+		evtsub.append(']');
+	}
 	if (di.evt=='S')
-    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa, di.evtsub.chars(),di.evtbases.chars(),
-    			di.tloc+1, di.context.chars(), rctx.chars(), status.chars(), impact.chars());
+    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa,
+    			evtsub.chars(),evtbases.chars(),
+    			di.tloc+1, tcontext.chars(), rctx.chars(), status.chars(), impact.chars());
 	else {
     	GStr fmt("%c\t%d\t%d(%c)\t");
     	if (di.evt=='I') fmt.append(":%s\t%d\t%s\t%s\t%s\t%s\n");
     			    else fmt.append("%s:\t%d\t%s\t%s\t%s\t%s\n");
-    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, di.evtbases.chars(), di.tloc+1, di.context.chars(),
+    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, evtbases.chars(), di.tloc+1,
+    			tcontext.chars(),
     			rctx.chars(), status.chars(), impact.chars());
 	}
   }
