@@ -17,7 +17,7 @@
       aligned to many target sequences using minimap2 --cs\n\
    -r provide the fasta file with query sequence(s) (required)\n\
    -o write difference data for each alignment into <diff_report.dfa>\n\
-   -s write summary counts into <summary.txt>\n\
+   -s write event summary counts into <summary.txt>\n\
    -w write MSA as multifasta into <outfile.mfa>\n\
    -G gene CDS analysis mode (default for query<100K; assumes -C)\n\
    -F full genome alignment mode (default for query>100Kb; assumes -N)\n\
@@ -92,13 +92,21 @@ struct TDiffInfo {
 	int evtlen; //event length (bases; 0 for deletion)
 	GStr evtbases; //bases inserted, deleted or newly substituted (by these bases)
 	GStr evtsub;  //for substitutions only: the original base(s)
-	int rloc; //location of the event on ref query sequence
+	//potential diff cause: homopolymer or methylation motif
+	int dcoffset; //rloc - (motif/hpoly start location)
+	char hpoly; //if homopolymer found, the repeated base
+	int hpolylen; //length of homopolymer, if found
+	GStr motif; //motif found
+
+	int rloc; //location of the event on theref query sequence
+	//---
 	//TODO: tloc must be converted to GLOBAL coordinates, on the full target sequence
 	int tloc; //location of the event within the aligned target region, on the *aligned strand*
 	GStr tctx; //target context: event+5 bases before and after the event (at least 10 bases)
 	char flags; //indicates if a methylation motif or a homopolymer was found in the context
-	TDiffInfo(char e=0):evt(e), evtlen(0), evtbases("",8), evtsub("",8), rloc(0),tloc(0),
-			tctx("",18), flags(0) { }
+	TDiffInfo(char e=0):evt(e), evtlen(0), evtbases("",8), evtsub("",8),
+			dcoffset(0),hpoly(0),hpolylen(0),motif(),
+			rloc(0),tloc(0), tctx("",18), flags(0) { }
 	void init(char e, int len, int rpos, int tpos) {
 		evt=e;
 		evtlen=len;
@@ -367,6 +375,8 @@ int main(int argc, char * const argv[]) {
    if (al.reverse) tlabel+='-';
    else tlabel+='+';
    if (freport) {
+	    if (qfasta.faIdx->getCount()==1 && !fullgenomeAlns)
+	    	  rlabel="";
         aln->printDiffInfo(rlabel, tlabel, freport, *refseq);
    }
    GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), al.r_alnstart);
@@ -874,7 +884,11 @@ void predictImpact(GStr& txt, TDiffInfo& di, GStr& r_trseq, int r_offset) {
 
 void PAFAlignment::printDiffInfo(GStr& rlabel, GStr& tlabel, FILE* f, GASeq& refseq) {
   double cov=((alninfo.r_alnend-alninfo.r_alnstart)*100.00)/alninfo.r_len;
-  fprintf(f, ">%s--%s coverage:%.2f score=%d edit_distance=%d\n",rlabel.chars(),
+  if (rlabel.is_empty())
+	  fprintf(f, ">%s coverage:%.2f score=%d edit_distance=%d\n",
+			  tlabel.chars(), cov, alnscore, edist);
+  else
+	  fprintf(f, ">%s--%s coverage:%.2f score=%d edit_distance=%d\n",rlabel.chars(),
 		  tlabel.chars(), cov, alnscore, edist);
   for (int i=0;i<tdiffs.Count();++i) {
 	TDiffInfo& di=tdiffs[i];
