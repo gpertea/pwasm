@@ -19,6 +19,8 @@
    -o write difference data for each alignment into <diff_report.dfa>\n\
    -s write event summary counts into <summary.txt>\n\
    -w write MSA as multifasta into <outfile.mfa>\n\
+   -R reverse mapping mode: input PAF has mappings of reads/contigs to\n\
+      a single reference sequence\n\
    -G gene CDS analysis mode (default for query<100K; assumes -C)\n\
    -F full genome alignment mode (default for query>100Kb; assumes -N)\n\
    -C perform codon impact analysis\n\
@@ -35,6 +37,7 @@ bool fullgenomeAlns=false; //full genome vs genome alignments, all query-target 
 bool skipCodAn=false; //skip codon impact assessments (-N/-C)?
 
 bool verbose=false;
+bool revMapping=false; // reverse mappings of multiple reads/contigs vs a reference sequence
 
 //methylation motifs:
 //TODO: these should be loaded from an external file
@@ -61,8 +64,11 @@ struct AlnInfo {
   int t_len; //raw length directly from the PAF field
   int t_alnstart;
   int t_alnend;
-  AlnInfo():reverse(2), r_id(NULL), r_len(0), r_alnstart(0), r_alnend(0),
-		  t_id(NULL), t_len(0), t_alnstart(0), t_alnend(0) {}
+  AlnInfo(char strand=0):reverse(2), r_id(NULL), r_len(0), r_alnstart(0), r_alnend(0),
+		  t_id(NULL), t_len(0), t_alnstart(0), t_alnend(0) {
+		if (strand=='+') reverse=0;
+		 else if (strand=='-') reverse=1;
+  }
   AlnInfo(char strand, const char* rid, const char* rlen, const char* rstart, const char* rend,
 		  const char* tid, const char* tlen, const char* tstart, const char* tend):r_id(rid), t_id(tid) {
 	reverse = (strand=='-') ? 1 : 0;
@@ -73,17 +79,21 @@ struct AlnInfo {
 	t_alnstart=atoi(tstart);
 	t_alnend=atoi(tend);
   }
-  void set(char strand, const char* rid, const char* rlen, const char* rstart, const char* rend,
-		  const char* tid, const char* tlen, const char* tstart, const char* tend) {
+  void init(const char* rid, const char* rlen, const char* rstart, const char* rend,
+		    const char* tid, const char* tlen, const char* tstart, const char* tend,
+		    char strand=0) {
 	r_id=rid;
 	t_id=tid;
-	reverse = (strand=='-') ? 1 : 0;
 	r_len = atoi(rlen);
 	r_alnstart=atoi(rstart);
 	r_alnend=atoi(rend);
 	t_len = atoi(tlen);
 	t_alnstart=atoi(tstart);
 	t_alnend=atoi(tend);
+	if (strand) {
+		if (strand=='+') reverse=0;
+		 else if (strand=='-') reverse=1;
+	}
   }
 };
 
@@ -137,7 +147,7 @@ class PAFAlignment {
   GVec<GapData> rgaps; //reference query gaps
   GVec<GapData> tgaps; //target gaps
   GVec<TDiffInfo> tdiffs; //indel/substitution events on this target sequence
-  char* seqname; //aligned target sequence (read, or genome mapping)
+  //char* seqname; //aligned target sequence (read, or genome mapping)
   char* cs; //cs tag value = difference string (short)
   int edist; //number of 1bp edits (edit distance) = NM tag value
   int alnscore; // AS tag value
@@ -148,11 +158,13 @@ class PAFAlignment {
   int clip5; //amount to clip on the left end (0 for PAF on tseq)
   int clip3; //amount to clip on the right end (0 for PAF on tseq)
   char reverse; //0, or 1 if this mapping is reverse complemented
+  GStr rlabel;
+  GStr tlabel;
   void parseErr(int fldno, const char* line);
-  void printDiffInfo(GStr& rlabel, GStr& tlabel, FILE* f, GASeq& refseq);
+  void printDiffInfo(FILE* f, GASeq& refseq);
   PAFAlignment(GDynArray<char*>& t, AlnInfo& alni, GASeq& refseq, GStr& tseq, const char* line);
    //this also rebuilds tseq with the target sequence, by transforming refseq according to cs string
-  ~PAFAlignment() { GFREE(seqname); GFREE(cs); GFREE(cigar); }
+  ~PAFAlignment() { GFREE(cs); GFREE(cigar); }
   //int nextRefGap(int& pos);
   //int nextSeqGap(int& pos);
  };
@@ -174,7 +186,7 @@ char* endSpToken(char* str) {
 //========================================================
 int main(int argc, char * const argv[]) {
  //GArgs args(argc, argv, "DGvd:o:c:");
- GArgs args(argc, argv, "DGFCNvd:p:r:o:m:w:c:s:");
+ GArgs args(argc, argv, "DGFRCNvd:p:r:o:m:w:c:s:");
  int e;
  if ((e=args.isError())>0) {
     GMessage("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -189,6 +201,7 @@ int main(int argc, char * const argv[]) {
 	 GMessage("%s Error: cannot use both -G and -F!\n",USAGE);
 	 exit(1);
  }
+ revMapping=(args.getOpt('R')!=NULL);
  bool forceCoding=(args.getOpt('C')!=NULL);
  bool forceNonCoding=(args.getOpt('N')!=NULL);
  if (forceCoding && forceNonCoding) {
@@ -240,13 +253,13 @@ int main(int argc, char * const argv[]) {
       } //clipmax option
 
   GStr outfile=args.getOpt('o');
-  FILE* freport=NULL;
+  FILE* freport=stdout;
   if (!outfile.is_empty()) {
      freport=fopen(outfile, "w");
      if (freport==NULL)
         GError("Cannot open file %s for writing!\n",outfile.chars());
-     }
-   else freport=stdout;
+  }
+  //else freport=stdout;
   //************************************************
   s=args.getOpt('r');
   if (s.is_empty()) GError("Error: query FASTA file (-r) is required!\n");
@@ -278,21 +291,6 @@ int main(int argc, char * const argv[]) {
   GList<GSeqAlign> msalns(false,   true, false);
                       // unsorted, free, not unique
   //msalns.setSorted(compareOrdnum);
-  /*
-  GFastaFile rfa(s.chars());
-  FastaSeq faseq;
-  FastaSeq* r=rfa.getFastaSeq(&faseq, "\x01");
-  if (r==NULL || faseq.getSeqLen()==0)
-	  GError("Error loading FASTA sequence from file %s !\n",s.chars());
-  GASeq *refseq=new GASeq(faseq, true); //take over faseq data
-
-  refseq->setFlag(GA_FLAG_IS_REF);
-  rseqs.Add(refseq->getId(),refseq);
-
-  refseq->allupper();
-  GASeq refseq_rc(*refseq);
-  refseq_rc.reverseComplement();
-  */
   GLineReader* linebuf=new GLineReader(inf);
   char* line;
   GSeqAlign *refMSA=NULL; //this will be the final MSA
@@ -310,12 +308,16 @@ int main(int argc, char * const argv[]) {
    //if (strcmp(t[0], refseq->getId())!=0)
    //   GError("Error: expected reference name (%s) in PAF line, but found %s instead!\n",
    //    		  refseq->getId(),t[0]);
-   AlnInfo al(*t[4], t[0], t[1], t[2], t[3], t[5], t[6], t[7], t[8]);
+   AlnInfo al(*t[4]);
+   if (revMapping)
+	    al.init(t[5], t[6], t[7], t[8],
+	    		t[0], t[1], t[2], t[3]);
+   else al.init(t[0], t[1], t[2], t[3],
+	            t[5], t[6], t[7], t[8]);
    if (strcmp(al.r_id, al.t_id)==0) {
 	  if (verbose) GMessage("Skipping alignment of qry seq to itself.\n");
       continue; //skip redundant inclusion of reference as its own child
    }
-
    GStr qtpair(al.r_id);
    if (!fullgenomeAlns) { //gene CDS mode
 	   qtpair.append('~');
@@ -349,8 +351,10 @@ int main(int argc, char * const argv[]) {
         refseq->setFlag(GA_FLAG_IS_REF);
         refseq->allupper();
       }
-      refseq_rc=new GASeq(*refseq);
-      refseq_rc->reverseComplement();
+      if (!revMapping) {
+        refseq_rc=new GASeq(*refseq);
+        refseq_rc->reverseComplement();
+      }
    }
 
    if (al.r_len!=refseq->getSeqLen())
@@ -358,29 +362,30 @@ int main(int argc, char * const argv[]) {
 		     al.r_len, refseq->getSeqLen(),lstr.chars());
 
    GASeq *r_seq = refseq;
-   if (al.reverse)
+   if (al.reverse && !revMapping)
       r_seq=refseq_rc;
    GStr tseq("", al.t_alnend-al.t_alnstart+2);
    PAFAlignment* aln=new PAFAlignment(t, al, *r_seq, tseq, lstr.chars());
    //this also fills tseq and sets aln->offset to the tseq mapping offset on refseq
-   GStr tlabel(al.t_id, 21);
-   GStr rlabel(al.r_id, 21);
+   //GStr tlabel(al.t_id, 26);
+   //GStr rlabel(al.r_id, 26);
    if (fullgenomeAlns) {
-	   rlabel+=':';
-	   rlabel+=al.r_alnstart;
-	   rlabel+='-';rlabel+=al.r_alnend;
+	   aln->rlabel+=':';
+	   aln->rlabel+=(al.r_alnstart+1);
+	   aln->rlabel+='-';aln->rlabel+=al.r_alnend;
    }
-   tlabel+=":";tlabel+=al.t_alnstart;tlabel+='-';
-   tlabel+=al.t_alnend;
-   if (al.reverse) tlabel+='-';
-   else tlabel+='+';
-   if (freport) {
-	    if (qfasta.faIdx->getCount()==1 && !fullgenomeAlns)
-	    	  rlabel="";
-        aln->printDiffInfo(rlabel, tlabel, freport, *refseq);
-   }
-   GASeq* taseq=new GASeq(tlabel.chars(), "", tseq.chars(), tseq.length(), al.r_alnstart);
-   taseq->revcompl=aln->reverse;
+   aln->tlabel+=":";aln->tlabel+=(al.t_alnstart+1);
+   aln->tlabel+='-';aln->tlabel+=al.t_alnend;
+   if (al.reverse) aln->tlabel+='-';
+   else aln->tlabel+='+';
+   //if (freport) {
+   if (qfasta.faIdx->getCount()==1 && !fullgenomeAlns)
+   	aln->rlabel="";
+   if (!revMapping) {
+        aln->printDiffInfo(freport, *refseq);
+   } //for revMapping, defer printing for when after the whole MSA/consensus is obtained!
+   GASeq* taseq=new GASeq(aln->tlabel.chars(), "", tseq.chars(), tseq.length(), al.r_alnstart);
+   if (!revMapping) taseq->revcompl=aln->reverse;
    GASeq* rseq=refseq; //only for the first ref alignment
    if (refseq->msa!=NULL) { //already have a MSA
      //need to merge this alignment into existing MSA refseq->msa
@@ -443,7 +448,7 @@ int main(int argc, char * const argv[]) {
    if (debugMode) { //write plain text alignment file
      fprintf(stderr,">MSA (%d)\n",refMSA->Count());
      refMSA->print(stderr, 'v');
-     }
+   }
    if (fmsa) {
      refMSA->writeMSA(fmsa);
      fclose(fmsa);
@@ -474,18 +479,28 @@ const char* CIGAR_ERROR="Error parsing cigar string from line: %s (cigar positio
 const char* CS_ERROR="Error parsing cs string from line: %s (cs position: %s)\n";
 
 //this also rebuilds tseq with the target sequence, by transforming refseq according to cs string
-PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr& tseq, const char* line):rgaps(),
-		tgaps(),tdiffs(), cs(NULL), edist(-1), alnscore(0), cigar(NULL) {
+PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr& tseq,
+		const char* line):rgaps(), tgaps(), tdiffs(), cs(NULL), edist(-1), alnscore(0),
+		cigar(NULL), seqlen(0), offset(0), clip5(0), clip3(0), reverse(0),
+		rlabel(), tlabel() {
   //toffs must be the offset of the alignment start from the beginning of the full, original refseq
   // so it's r_clip5 (or r_clip3 if it's revcomp)
-  seqname=Gstrdup(t[5]);
+  //seqname=Gstrdup(t[5]);
   alninfo=al; //do we still need to keep it? *_id pointers will be obsolete
-  reverse=al.reverse;
-  clip5=0; //always cutting out the aligned region from the target sequence
-  clip3=0;
+  if (revMapping) {
+	 rlabel=t[5];
+	 tlabel=t[0];
+  }
+  else {
+	 rlabel=t[0];
+	 tlabel=t[5];
+	 reverse=al.reverse;
+  }
+  //clip5=0; //always cutting out the aligned region from the target sequence
+  //clip3=0;
   offset=al.r_alnstart;
   //int base_ofs=offset; //mismatch base offset -- different for
-  if (al.reverse) { //offset is on the reverse complement ref string
+  if (reverse) { //offset is on the reverse complement ref string
 	   offset=al.r_len-al.r_alnend;
   }
   seqlen=al.t_alnend-al.t_alnstart; //check this against the cigar string, and the cs string
@@ -882,7 +897,7 @@ void predictImpact(GStr& txt, TDiffInfo& di, GStr& r_trseq, int r_offset) {
   }
 }
 
-void PAFAlignment::printDiffInfo(GStr& rlabel, GStr& tlabel, FILE* f, GASeq& refseq) {
+void PAFAlignment::printDiffInfo(FILE* f, GASeq& refseq) {
   double cov=((alninfo.r_alnend-alninfo.r_alnstart)*100.00)/alninfo.r_len;
   if (rlabel.is_empty())
 	  fprintf(f, ">%s coverage:%.2f score=%d edit_distance=%d\n",
