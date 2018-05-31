@@ -19,10 +19,12 @@
    -o write difference data for each alignment into <diff_report.dfa>\n\
    -s write event summary counts into <summary.txt>\n\
    -w write MSA as multifasta into <outfile.mfa>\n\
-   -R reverse mapping mode: input PAF has mappings of reads/contigs to\n\
-      a single reference sequence\n\
    -G gene CDS analysis mode (default for query<100K; assumes -C)\n\
    -F full genome alignment mode (default for query>100Kb; assumes -N)\n\
+   -R reverse mapping mode: input PAF has mappings of reads/contigs to\n\
+      a single reference sequence\n\
+   -A like -R mode, but assemble all read mappings into a consensus and\n\
+      report differences on the assembly instead of individual mappings\n\
    -C perform codon impact analysis\n\
    -N skip codon impact analysis\n"
 
@@ -37,7 +39,8 @@ bool fullgenomeAlns=false; //full genome vs genome alignments, all query-target 
 bool skipCodAn=false; //skip codon impact assessments (-N/-C)?
 
 bool verbose=false;
-bool revMapping=false; // reverse mappings of multiple reads/contigs vs a reference sequence
+bool revMapping=false; // -R : reverse mappings of multiple reads/contigs vs a reference sequence
+bool makeConsensus=false; // -A : assemble reverse mappings into a consensus before analyzing differences
 
 //methylation motifs:
 //TODO: these should be loaded from an external file
@@ -128,11 +131,12 @@ struct TDiffInfo {
 		flags=0;
 	}
 	void setTContext(GStr& tseq) {
-		 int tc_start=tloc-5;
-		 if (tc_start<0) tc_start=0;
 		 int evt_len=evtlen;
 		 if (evt=='D') evt_len=0;
-		 int tc_end=tloc+evt_len+5;
+		 int thi=(evt_len+10)>>1;
+		 int tc_start=tloc-thi;
+		 if (tc_start<0) tc_start=0;
+		 int tc_end=tloc+thi;
 		 if (tc_end>=tseq.length()) tc_end=tseq.length()-1;
 		 tctx=tseq.substr(tc_start, tc_end-tc_start);
 	}
@@ -186,7 +190,7 @@ char* endSpToken(char* str) {
 //========================================================
 int main(int argc, char * const argv[]) {
  //GArgs args(argc, argv, "DGvd:o:c:");
- GArgs args(argc, argv, "DGFRCNvd:p:r:o:m:w:c:s:");
+ GArgs args(argc, argv, "DGFRACNvd:p:r:o:m:w:c:s:");
  int e;
  if ((e=args.isError())>0) {
     GMessage("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -202,6 +206,8 @@ int main(int argc, char * const argv[]) {
 	 exit(1);
  }
  revMapping=(args.getOpt('R')!=NULL);
+ makeConsensus=(args.getOpt('A')!=NULL);
+ if (makeConsensus) revMapping=true;
  bool forceCoding=(args.getOpt('C')!=NULL);
  bool forceNonCoding=(args.getOpt('N')!=NULL);
  if (forceCoding && forceNonCoding) {
@@ -381,9 +387,9 @@ int main(int argc, char * const argv[]) {
    //if (freport) {
    if (qfasta.faIdx->getCount()==1 && !fullgenomeAlns)
    	aln->rlabel="";
-   if (!revMapping) {
+   if (!makeConsensus) {
         aln->printDiffInfo(freport, *refseq);
-   } //for revMapping, defer printing for when after the whole MSA/consensus is obtained!
+   }
    GASeq* taseq=new GASeq(aln->tlabel.chars(), "", tseq.chars(), tseq.length(), al.r_alnstart);
    if (!revMapping) taseq->revcompl=aln->reverse;
    GASeq* rseq=refseq; //only for the first ref alignment
@@ -487,20 +493,16 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
   // so it's r_clip5 (or r_clip3 if it's revcomp)
   //seqname=Gstrdup(t[5]);
   alninfo=al; //do we still need to keep it? *_id pointers will be obsolete
-  if (revMapping) {
-	 rlabel=t[5];
-	 tlabel=t[0];
-  }
-  else {
-	 rlabel=t[0];
-	 tlabel=t[5];
-	 reverse=al.reverse;
-  }
+  rlabel=al.r_id;
+  tlabel=al.t_id;
+  //if (!revMapping) {
+	reverse=al.reverse;
+  //}
   //clip5=0; //always cutting out the aligned region from the target sequence
   //clip3=0;
   offset=al.r_alnstart;
   //int base_ofs=offset; //mismatch base offset -- different for
-  if (reverse) { //offset is on the reverse complement ref string
+  if (reverse && !revMapping) { //offset is on the reverse complement ref string
 	   offset=al.r_len-al.r_alnend;
   }
   seqlen=al.t_alnend-al.t_alnstart; //check this against the cigar string, and the cs string
@@ -552,6 +554,10 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
     char op=*p;
     int cl=0;
     p++;
+    if (revMapping) {
+    	if (op=='-') op='+';
+    	else if (op=='+') op='-';
+    }
     switch (op) {
       case ':':
     	if (!parseInt(p,cl)) GError(CS_ERROR, line, p);
@@ -560,8 +566,13 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
     	tpos+=cl;
     	break;
       case '*': //substitution
-	    tch=toupper(*p);++p;
-	    qch=toupper(*p);++p;
+    	if (revMapping) {
+   	       qch=toupper(*p);++p;
+  	       tch=toupper(*p);++p;
+    	} else {
+	       tch=toupper(*p);++p;
+	       qch=toupper(*p);++p;
+    	}
 	    q_pos=offset+qpos;
 	    if (qch!=refseq.getSeq()[q_pos]) {
 	    	GError("Error: base mismatch %c != qstr[%d] (%c) at line\n%s\n",
@@ -577,7 +588,7 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 			dif.init('S', 1, q_pos, tpos);
 			dif.evtbases.append((char)toupper(tch));
 			dif.evtsub.append((char)toupper(qch));
-			//keep substitutions on reverse to simplify merging
+			//keep substitution location on reverse to simplify merging
 			/*
 			if (reverse) {
 				revCompl(dif.evtbases);
@@ -607,14 +618,14 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
     	q_pos=offset+qpos;
 		dif.init('I', e_len, q_pos, s_pos);
 		dif.evtbases.append(tseq.substr(-e_len));
-		if (reverse) {
+		if (reverse && !revMapping) {
 			revCompl(dif.evtbases);
 			dif.rloc=al.r_len-q_pos;
 		}
 		this->tdiffs.Add(dif);
     	//qpos unchanged, offset+qpos is the location of the gap in qseq
     	break;
-      case '+': //gap in tseq (insertion in tseq, deletion in qseq)
+      case '+': //gap in tseq
     	s_pos=qpos;
     	while (isalpha(qch=toupper(*p))) {
     		++p;
@@ -625,7 +636,7 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
     	//these bases are missing in tseq (deletion)
 		dif.init('D', e_len, q_pos, tpos);
 		dif.evtbases.append(refseq.getSeq()+q_pos, e_len);
-		if (reverse) {
+		if (reverse && !revMapping) {
 			revCompl(dif.evtbases);
 			dif.rloc=al.r_len-q_pos-e_len;
 		}
@@ -643,19 +654,25 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
   for (int d=0;d<tdiffs.Count();d++) {
 	  tdiffs[d].setTContext(tseq);
 	  if (reverse) {
-		revCompl(tdiffs[d].tctx);
-		//also reverse the location so it shows as if tseq was reversed
-		tdiffs[d].tloc=tseq.length()-tdiffs[d].tloc;
-	    if (tdiffs[d].evt=='S') {
-		  //substitutions were kept on reverse to simplify merging
-		  //so now it's time to adjust that
-			revCompl(tdiffs[d].evtbases);
-			revCompl(tdiffs[d].evtsub);
-			tdiffs[d].rloc=al.r_len-tdiffs[d].rloc-tdiffs[d].evtbases.length();
-		}
-	  }
-  }
-  if (reverse) tdiffs.Reverse();
+		if (revMapping) {
+			if (tdiffs[d].evt=='S' || tdiffs[d].evt=='I')
+				 tdiffs[d].tloc+=tdiffs[d].evtbases.length();
+		    tdiffs[d].tloc=tseq.length()-tdiffs[d].tloc;
+		//this location is relative to the beginning of the alignment
+		} else { // !revMapping
+			revCompl(tdiffs[d].tctx);
+			//also reverse the location so it shows as if tseq was reversed
+			if (tdiffs[d].evt=='S') {
+			  //substitutions were kept on reverse to simplify merging
+			  //so now it's time to adjust that
+				revCompl(tdiffs[d].evtbases);
+				revCompl(tdiffs[d].evtsub);
+				tdiffs[d].rloc=al.r_len-tdiffs[d].rloc-tdiffs[d].evtbases.length();
+			}
+		} //reverse && !revMapping
+	  } //if reverse
+  } //for each tdiff
+  if (reverse & !revMapping) tdiffs.Reverse();
   //parse cigar string to get the gaps
   p=cigar;
   int mbases = 0; //count "aligned" bases (includes mismatches)
@@ -670,6 +687,10 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	  if (!parseInt(p,cl)) GError(CIGAR_ERROR, line, p);
 	  char cop=*p;
 	  if (cop=='\0') GError(CIGAR_ERROR, line, p);
+	  if (revMapping) {
+		  if (cop=='D') cop='I';
+		  else if (cop=='I') cop='D';
+	  }
 	  switch (cop) {
 	   case 'X':
 	   case 'M':
@@ -703,7 +724,7 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 	   case 'D':
 		 //deletion in target sequence relative to the query (gap in query ref seq)
 		 gap.pos=offset+qpos;
-		 if (reverse) //actual location on qry ref for a reverse complement match:
+		 if (reverse && !revMapping) //actual location on qry ref for a reverse complement match:
 			  gap.pos=al.r_len-gap.pos;
 		 gap.len=cl;
 		 rgaps.Add(gap);
@@ -717,10 +738,11 @@ PAFAlignment::PAFAlignment(GDynArray<char*>& t, AlnInfo& al, GASeq& refseq, GStr
 		 tpos+=cl;
 		 //shouldn't really happen in genomic PAF
 		 gap.pos=offset+qpos;
-		 if (reverse) //actual location on qry ref for a reverse complement match:
+		 if (reverse && !revMapping) //actual location on qry ref for a reverse complement match:
 			  gap.pos=al.r_len-gap.pos;
 		 gap.len=cl;
 		 rgaps.Add(gap);
+		 GMessage("Warning: introns are not supported by this application!\n%s\n", line);
 		 break;
 	   default:
 		 GError("Error: unhandled cigar_op %c (len %d) in %s\n", cop, cl, line);
@@ -954,15 +976,17 @@ void PAFAlignment::printDiffInfo(FILE* f, GASeq& refseq) {
 		evtsub.append(dlen);
 		evtsub.append(']');
 	}
+	int rloc=di.rloc+1;
+	int tloc=alninfo.t_alnstart+di.tloc+1;
 	if (di.evt=='S')
-    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\t%s\t%s\n", di.evt, di.rloc+1, aapos, aa,
+    	fprintf(f, "%c\t%d\t%d(%c)\t%s:%s\t%d\t%s\t%s\t%s\t%s\n", di.evt, rloc, aapos, aa,
     			evtsub.chars(),evtbases.chars(),
-    			di.tloc+1, tcontext.chars(), rctx.chars(), status.chars(), impact.chars());
+    			tloc, tcontext.chars(), rctx.chars(), status.chars(), impact.chars());
 	else {
     	GStr fmt("%c\t%d\t%d(%c)\t");
     	if (di.evt=='I') fmt.append(":%s\t%d\t%s\t%s\t%s\t%s\n");
     			    else fmt.append("%s:\t%d\t%s\t%s\t%s\t%s\n");
-    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, evtbases.chars(), di.tloc+1,
+    	fprintf(f, fmt.chars(), di.evt, di.rloc+1, aapos, aa, evtbases.chars(), tloc,
     			tcontext.chars(),
     			rctx.chars(), status.chars(), impact.chars());
 	}
