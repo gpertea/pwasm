@@ -90,6 +90,23 @@ GASeq::~GASeq() {
 	GFREE(cov);
 #endif
 }
+/*
+void GASeq::loadProcessing() {
+	//process all delops
+	for (int i = 0; i < delops->Count(); i++) {
+		SeqDelOp& delop = *delops->Get(i);
+		int pos = delop.revcompl ? len - delop.pos - 1 : delop.pos;
+		removeBase(pos);
+	}
+	if (revcompl == 1)
+		reverseComplement();
+}
+*/
+
+void GASeq::finalize() {
+	 if (this->len==0)  GError("Error: sequence for %s not loaded!\n",this->getId());
+	 if (!this->hasFlag(GA_flag_PREPPED)) this->prepSeq();
+}
 
 void GASeq::prepSeq() {
 	//should only be called once (use hasFlag() before calling)

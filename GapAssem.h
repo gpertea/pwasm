@@ -129,6 +129,7 @@ public:
   void printMFasta(FILE* f, int llen=60); //offset padded
   //void loadProcessing(); //to be called immediately after loading the sequence
                    // it will revCompl if needed and apply delops
+  void finalize(); //delete inserts and reverse complement sequence if needed
   #ifdef ALIGN_COVERAGE_DATA
   void addCoverage(GASeq* s);
   #endif
