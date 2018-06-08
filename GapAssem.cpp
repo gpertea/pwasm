@@ -1,6 +1,11 @@
 #include "GapAssem.h"
 #include "GStr.h"
 
+const unsigned char GA_flag_IS_REF=0;
+const unsigned char GA_flag_HAS_PARENT=1;
+const unsigned char GA_flag_BAD_ALIGN=7;
+const unsigned char GA_flag_PREPPED=5;
+
 //bool GASeq::debug=false;
 bool MSAColumns::removeConsGaps = true;
 bool MSAColumns::refineClipping = true;
@@ -97,7 +102,7 @@ void GASeq::prepSeq() {
 	if (revcompl == 1)
 		reverseComplement();
 
-	setFlag(GA_FLAG_PREPPED);
+	setFlag(GA_flag_PREPPED);
 }
 
 //set the gap length in this position
@@ -548,7 +553,7 @@ int GASeq::removeClipGaps() { //remove gaps within clipped regions
 	return delgapsL + delgapsR;
 }
 
-void GASeq::toMSA(MSAColumns& msacols) {
+void GASeq::toMSA(MSAColumns& msacols, int nucValue) {
 	if (len == 0 || len != seqlen)
 		GError(
 		    "GASeq::toMSA Error: invalid sequence data '%s' (len=%d, seqlen=%d)\n",
@@ -578,10 +583,10 @@ void GASeq::toMSA(MSAColumns& msacols) {
 		for (int j = 0; j < ofs[i]; j++) {
 			//storing gap
 			if (!clipped)
-				msacols[col].addGap();
+				msacols[col].addGap(nucValue);
 			col++;
 		}
-		msacols[col].addNuc(this, i, clipped);
+		msacols[col].addNuc(this, i, clipped, nucValue);
 		if (!clipped)
 			maxcol = col;
 		col++;
@@ -599,6 +604,7 @@ void GASeq::toMSA(MSAColumns& msacols) {
 #ifdef ALIGN_COVERAGE_DATA
 GSeqAlign::GSeqAlign(GASeq* s1, int l1, int r1,
 		GASeq* s2, int l2, int r2)
+//:GList<GASeq>(true,true,false) {
 :GList<GASeq>(false,true,false) {
 #else
 
@@ -1007,7 +1013,7 @@ void GSeqAlign::finalize() { //prepare for printing
   for (int i=0;i<Count();i++) {
 	 GASeq* s=Get(i);
 	 if (s->len==0)  GError("Error: sequence for %s not loaded!\n",s->getId());
-	 if (!s->hasFlag(GA_FLAG_PREPPED)) s->prepSeq();
+	 if (!s->hasFlag(GA_flag_PREPPED)) s->prepSeq();
   }
 }
 void GSeqAlign::print(FILE* f, char c) {
@@ -1085,7 +1091,7 @@ void GAlnColumn::remove() {
 	    "Warning: column remove() couldn't find a sequence at that position!\n");
 }
 
-void GSeqAlign::buildMSA() {
+void GSeqAlign::buildMSA(bool refWeighDown) {
 	if (msacolumns != NULL)
 		GError("Error: cannot call buildMSA() twice!\n");
 	msacolumns = new MSAColumns(length, minoffset);
@@ -1097,10 +1103,14 @@ void GSeqAlign::buildMSA() {
 			GMessage("Warning: sequence %s (length %d) was trimmed too badly (%d,%d)"
 					 " -- should be removed from MSA w/ %s!\n", seq->id, seq->seqlen,
 			    seq->clp5, seq->clp3, Get(0)->id);
-			seq->setFlag(GA_FLAG_BAD_ALN); //bad-align flag!
+			seq->setFlag(GA_flag_BAD_ALIGN); //bad-align flag!
 			badseqs++;
 		}
-		seq->toMSA(*msacolumns);
+		int incVal=1;
+		if (refWeighDown && !seq->hasFlag(GA_flag_IS_REF)) {
+			incVal = 10;
+		}
+		seq->toMSA(*msacolumns, incVal);
 	}
 	//this->Pack();
 }
@@ -1130,14 +1140,14 @@ void GSeqAlign::ErrZeroCov(int col) {
 	exit(5);
 }
 
-void GSeqAlign::refineMSA(bool redo_ends) {
+void GSeqAlign::refineMSA(bool refWeighDown, bool redo_ends) {
 	if (redo_ends) {
 		//TODO:
 		//recompute consensus at the ends of MSA INCLUDING trimmed sequence
 		//and recompute the trimming accordingly
 	} else { //freeze end trimming
 		//if (msacolumns==NULL)
-		buildMSA(); //populate MSAColumns only based on existing trimming
+		buildMSA(refWeighDown); //populate MSAColumns only based on existing trimming
 	}
 	//==> remove columns and build consensus
 	int cols_removed = 0;
@@ -1197,10 +1207,10 @@ void GSeqAlign::extendConsensus(char c) {
 	consensus_len++;
 }
 
-void GSeqAlign::writeACE(FILE* f, const char* name) {
+void GSeqAlign::writeACE(FILE* f, const char* name, bool refWeighDown) {
 	//--build a consensus sequence
 	if (!refinedMSA)
-		refineMSA();
+		refineMSA(refWeighDown);
 
 	//FastaSeq conseq((char*)name);
 	//conseq.setSeqPtr(consensus, consensus_len, consensus_cap);
@@ -1261,7 +1271,7 @@ void GSeqAlign::writeACE(FILE* f, const char* name) {
 
 }
 
-void GSeqAlign::writeInfo(FILE* f, const char* name) {
+void GSeqAlign::writeInfo(FILE* f, const char* name, bool refWeighDown) {
 	/*
 	 File format should match assembly & asmbl_link tables in our db:
 
@@ -1289,7 +1299,7 @@ void GSeqAlign::writeInfo(FILE* f, const char* name) {
 //--build the actual MSA and a consensus sequence, if not done yet:
 // this will also remove the consensus gaps as appropriate (unless disabled)
 	if (!refinedMSA)
-		refineMSA();
+		refineMSA(refWeighDown);
 //-- also compute this, just in case:
 // redundancy = sum(asm_rend-asm_lend+1)/contig_len
 //(and also the pid for each reads vs. consensus)

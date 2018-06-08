@@ -9,11 +9,10 @@
 class GSeqAlign;
 class MSAColumns;
 
-#define GA_FLAG_IS_REF     0
-//this is only for tree/transitive embedding:
-#define GA_FLAG_HAS_PARENT 1
-#define GA_FLAG_PREPPED    2
-#define GA_FLAG_BAD_ALN    7
+extern const unsigned char GA_flag_IS_REF;
+extern const unsigned char GA_flag_HAS_PARENT;
+extern const unsigned char GA_flag_BAD_ALIGN;
+extern const unsigned char GA_flag_PREPPED;
 
 struct SeqDelOp {
   int pos;
@@ -128,13 +127,15 @@ public:
   void printGappedSeq(int baseoffs=0) { printGappedSeq(stdout, baseoffs); }
   void printGappedFasta(FILE* f);
   void printMFasta(FILE* f, int llen=60); //offset padded
+  //void loadProcessing(); //to be called immediately after loading the sequence
+                   // it will revCompl if needed and apply delops
   #ifdef ALIGN_COVERAGE_DATA
   void addCoverage(GASeq* s);
   #endif
   void reverseGaps(); //don't update offset and flags
                       //useful after reading mgblast gap info
   void revComplement(int alignlen=0);
-  void toMSA(MSAColumns& msa);
+  void toMSA(MSAColumns& msa, int nucValue=1);
 };
 
 // -- nucleotide origin -- for every nucleotide in a MSA column
@@ -292,11 +293,11 @@ class GAlnColumn {
    delete nucs;
    if (clipnuc!=NULL) delete clipnuc;
    }
-  void addGap() { counts[ncGap].count++;
+  void addGap(int nucVal=1) { counts[ncGap].count+=nucVal;
                   layers++; //-- Not a "layer", actually
                   //numgaps++;
                   }
-  void addNuc(GASeq* seq, int pos, bool clipped=false) {
+  void addNuc(GASeq* seq, int pos, bool clipped=false, short nucVal=1) {
    //assumes the seq is already loaded and reverse complemented if necessary
    //position is precisely where it should be
    if (clipped) {
@@ -309,28 +310,28 @@ class GAlnColumn {
    char c=(char)toupper(seq->seq[pos]);
    switch (c) {
        case 'A':nucs->Add(new NucOri(seq,pos));
-                counts[ncA].count++;
+                counts[ncA].count+=nucVal;
                 layers++;
                 break;
        case 'C':nucs->Add(new NucOri(seq,pos));
-                counts[ncC].count++;
+                counts[ncC].count+=nucVal;
                 layers++;
                 break;
        case 'G':nucs->Add(new NucOri(seq,pos));
-                counts[ncG].count++;
+                counts[ncG].count+=nucVal;
                 layers++;
                 break;
        case 'T':nucs->Add(new NucOri(seq,pos));
-                counts[ncT].count++;
+                counts[ncT].count+=nucVal;
                 layers++;
                 break;
        case '-': //this shouldn't be the case!
-       case '*':counts[ncGap].count++;
+       case '*':counts[ncGap].count+=nucVal;
                 layers++;
                 //numgaps++;
                 break;
        default: nucs->Add(new NucOri(seq,pos));
-                counts[ncN].count++;
+                counts[ncN].count+=nucVal;
                 layers++;
                 //numN++;
        }//switch
@@ -377,12 +378,13 @@ class MSAColumns {
 
 
 //-----------------------------------------------
-// a sequence alignment of 2 or more sequences (MSA)
+// a sequence alignment: could be pairwise or MSA
 class GSeqAlign :public GList<GASeq> {
+   //static unsigned int counter;
    int length;
    int minoffset;
    int consensus_cap;
-   void buildMSA();
+   void buildMSA(bool refWeighDown=false);
    void ErrZeroCov(int col);
  public:
     bool refinedMSA; //if refineMSA() was applied
@@ -405,6 +407,7 @@ class GSeqAlign :public GList<GASeq> {
      return (this<&d);
      }
   //--
+  //GSeqAlign():GList<GASeq>(true,true,false), length(0), minoffset(0),
   GSeqAlign():GList<GASeq>(false,true,false), length(0), minoffset(0),
   		consensus_cap(0), refinedMSA(false), msacolumns(NULL), ordnum(0),
   		ng_len(0),ng_minofs(0), badseqs(0), consensus(NULL), consensus_len(0) {
@@ -415,6 +418,7 @@ class GSeqAlign :public GList<GASeq> {
   		consensus_cap(0), refinedMSA(false), msacolumns(NULL), ordnum(0),
   		ng_len(0),ng_minofs(0), badseqs(0), consensus(NULL), consensus_len(0) {
     }
+  //void incOrd() { ordnum = ++counter; }
   void incOrd() { ordnum++; }
   //first time creation from a pairwise alignment:
   #ifdef ALIGN_COVERAGE_DATA
@@ -453,11 +457,11 @@ class GSeqAlign :public GList<GASeq> {
   void print() { print(stdout); }
   void removeColumn(int column);
   void freeMSA();
-  void refineMSA(bool redo_ends=false);
+  void refineMSA(bool refWeighDown=false, bool redo_ends=false);
       // find consensus, refine clipping, remove gap-columns
-  void writeACE(FILE* f, const char* name);
+  void writeACE(FILE* f, const char* name, bool refWeighDown=false);
   void writeMSA(FILE* f, int linelen=60); //write as multi-FASTA (MAF?) file
-  void writeInfo(FILE* f, const char* name);
+  void writeInfo(FILE* f, const char* name, bool refWeighDown=false);
 };
 
 int compareOrdnum(void* p1, void* p2);

@@ -354,7 +354,7 @@ int main(int argc, char * const argv[]) {
         GFaSeqGet* seq=qfasta.fetch(al.r_id);
         if (seq==NULL) GError("Error: could not retrieve sequence for %s !\n",al.r_id);
         refseq=new GASeq(al.r_id, NULL, seq->seq(), seq->getseqlen());
-        refseq->setFlag(GA_FLAG_IS_REF);
+        refseq->setFlag(GA_flag_IS_REF);
         refseq->allupper();
       }
       if (!revMapping) {
