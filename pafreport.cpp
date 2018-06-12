@@ -10,7 +10,7 @@
 #include "codons.h"
 
 #define USAGE "Usage:\n\
- pafreport <paf_with_cg_cs> -r <refseq.fa> [-s <summary.txt>]\n\
+ pafreport <paf_with_cg_cs> -r <refseq.fa> [-R] [-s <summary.txt>]\n\
     [-o <diff_report.dfa>][-w <outfile.mfa>] [-G|-F|-C|-N]\n\
     \n\
    <paf_with_cg_cs> is the input PAF file with high quality query sequence(s)\n\
@@ -23,10 +23,11 @@
    -F full genome alignment mode (default for query>100Kb; assumes -N)\n\
    -R reverse mapping mode: input PAF has mappings of reads/contigs to\n\
       a single reference sequence\n\
-   -A like -R mode, but assemble all read mappings into a consensus and\n\
-      report differences on the assembly instead of individual mappings\n\
    -C perform codon impact analysis\n\
    -N skip codon impact analysis\n"
+   
+//   -A like -R mode, but assemble all read mappings into a consensus and\n  
+//      report differences on the assembly instead of individual mappings\n  
 
 #define LOG_MSG_CLIPMAX "Overlap between %s and target %s rejected due to clipmax=%4.2f constraint.\n"
 #define LOG_MSG_OVLCLIP "Overlap between %s and %s invalidated by the %dnt clipping of %s at %d' end.\n"

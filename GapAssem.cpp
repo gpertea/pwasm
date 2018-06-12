@@ -201,7 +201,7 @@ void GASeq::removeBase(int pos) {
 	 */
 }
 
-void GASeq::refineClipping(char* cons, int cons_len, int cpos, bool skipDels) {
+void GASeq::refineClipping(GDynArray<char>& cons, int cpos, bool skipDels) {
 	//check if endings match consensus..
 	//adjust clipping as appropriate
 	//int clipL, clipR;
@@ -300,7 +300,7 @@ void GASeq::refineClipping(char* cons, int cons_len, int cpos, bool skipDels) {
 		int maxscore = MATCH_SC;
 		int startpos = sp;
 		int bestpos = sp; //new Right clipping position for maxscore
-		while (score > XDROP && ++cp < cons_len && ++sp < glen) {
+		while (score > XDROP && ++cp < (int)cons.Count() && ++sp < glen) {
 			if (gseq[sp] == cons[cp]) {
 				if (gseq[sp] != '*') { //real match
 					score += MATCH_SC;
@@ -467,7 +467,7 @@ void GASeq::printGappedFasta(FILE* f) {
 		    "GASeq print Error: invalid sequence data '%s' (len=%d, seqlen=%d)\n",
 		    id, len, seqlen);
 	int i;
-	/*
+	/*  //FIXME TESTME - original mblaor had this uncommented!
 	int clipL, clipR;
 	if (revcompl != 0) {
 		clipL = clp3;
@@ -624,11 +624,10 @@ GSeqAlign::GSeqAlign(GASeq* s1, int l1, int r1,
 //:GList<GASeq>(true,true,false) {
 :GList<GASeq>(false,true,false) {
 #else
-
 GSeqAlign::GSeqAlign(GASeq* s1, GASeq* s2) :
 		GList<GASeq>(false, true, false), length(0), minoffset(0),
-  		consensus_cap(0), refinedMSA(false), msacolumns(NULL), ordnum(0),
-  		ng_len(0),ng_minofs(0), badseqs(0), consensus(NULL), consensus_len(0) {
+  		refinedMSA(false), msacolumns(NULL), ordnum(0),
+  		ng_len(0),ng_minofs(0), badseqs(0), consensus(512), consensus_bq(512) {
 #endif
 	s1->msa = this;
 	s2->msa = this;
@@ -1068,7 +1067,7 @@ void GSeqAlign::writeMSA(FILE* f, int linelen) {
 	}
 }
 
-char GAlnColumn::bestChar() {  //returns most frequent char -- could be a gap!
+char GAlnColumn::bestChar(int16_t *qscore) {  //returns most frequent char -- could be a gap!
 	if (layers == 0)
 		return 0;
 	if (consensus != 0)
@@ -1078,14 +1077,25 @@ char GAlnColumn::bestChar() {  //returns most frequent char -- could be a gap!
 		countsSorted = true;
 	}
 	int r = 0;
-	char best = counts[0].c;
-	for (;;) {
-		if ((best == '-' || best == 'N')
-		    && counts[r].count == counts[r + 1].count) {
+	char best = counts[0].nt;
+	int bq = counts[0].count;
+	for (;r<5;) {
+		//if gap or N have the same freq as a real base, pick the base instead
+		if ((best == '-' || best == 'N') &&
+		     counts[r].count == counts[r + 1].count) {
 			r++;
-			best = counts[r].c;
+			best = counts[r].nt;
+			bq = counts[r].count;
 		} else
 			break;
+	}
+	if (qscore!=NULL) {
+	   for (int q=0;q<6;++q) {
+		   if (q!=r) bq-=counts[q].count;
+	   }
+	   if (bq<=SHRT_MIN) bq=SHRT_MIN+1;
+	   if (bq>=SHRT_MAX) bq=SHRT_MAX-1;
+	   *qscore=(short)bq;
 	}
 	consensus = best;
 	return best;
@@ -1169,7 +1179,8 @@ void GSeqAlign::refineMSA(bool refWeighDown, bool redo_ends) {
 	//==> remove columns and build consensus
 	int cols_removed = 0;
 	for (int col = msacolumns->mincol; col <= msacolumns->maxcol; col++) {
-		char c = msacolumns->columns[col].bestChar();
+		int16_t qscore=0;
+		char c = msacolumns->columns[col].bestChar(&qscore);
 		if (c == 0) { //should never be the case!
 			ErrZeroCov(col);
 			c = '*';
@@ -1185,15 +1196,17 @@ void GSeqAlign::refineMSA(bool refWeighDown, bool redo_ends) {
 				continue;//don't add this gap to the consensus
 			}
 		}
-		extendConsensus(c);
+		extendConsensus(c, qscore);
 	}
+	//make sure consensus is 0 terminated:
+	char e=0;consensus.Add(e);consensus.Pop();
 	//-- refine clipping and remove gaps propagated in the clipping regions
 	for (int i = 0; i < Count(); i++) {
 		GASeq* seq = Get(i);
 		//if (seq->hasFlag(7)) continue; -- checking the badalign flag..
 		//refine clipping -- first pass:
 		if (MSAColumns::refineClipping)
-			seq->refineClipping(consensus, consensus_len,
+			seq->refineClipping(consensus, //consensus_len,
 			    seq->offset - minoffset - msacolumns->mincol);
 
 		//..remove any "gaps" in the non-aligned (trimmed) regions
@@ -1203,13 +1216,14 @@ void GSeqAlign::refineMSA(bool refWeighDown, bool redo_ends) {
 		//if any gaps were removed, take one more shot at
 		//refining the clipping -- we may get lucky and realign better..
 		if (grem != 0 && MSAColumns::refineClipping)
-			seq->refineClipping(consensus, consensus_len,
+			seq->refineClipping(consensus, //consensus_len,
 			    seq->offset - minoffset - msacolumns->mincol, true);
 	}
 	refinedMSA = true;
 }
 
-void GSeqAlign::extendConsensus(char c) {
+void GSeqAlign::extendConsensus(char c, int16_t bq) {
+	/*
 	int newlen = consensus_len + 1;
 	if (newlen >= consensus_cap) {
 		consensus_cap += 128;
@@ -1222,6 +1236,11 @@ void GSeqAlign::extendConsensus(char c) {
 	consensus[consensus_len] = c;
 	consensus[newlen] = 0;
 	consensus_len++;
+	*/
+	consensus.Add(c);
+	if (bq!=SHRT_MIN && consensus_bq.Count()==consensus.Count()-1) {
+		consensus_bq.Add(bq);
+	}
 }
 
 void GSeqAlign::writeACE(FILE* f, const char* name, bool refWeighDown) {
@@ -1242,11 +1261,24 @@ void GSeqAlign::writeACE(FILE* f, const char* name, bool refWeighDown) {
 	}
 	char consDir = (rvs > fwd) ? 'C' : 'U';
 
-	fprintf(f, "CO %s %d %d 0 %c\n", name, consensus_len, Count(), consDir);
+	fprintf(f, "CO %s %d %d 0 %c\n", name, consensus.Count(), Count(), consDir);
 	//   conseq.len, Count()-badseqs, consDir);
 	//conseq.fprint(f,60);
-	FastaSeq::write(f, NULL, NULL, consensus, 60, consensus_len);
-	fprintf(f, "\nBQ \n\n");
+	FastaSeq::write(f, NULL, NULL, consensus(), 60, consensus.Count());
+	//fprintf(f, "\nBQ \n\n"); //TODO: print consensus_bq array values here!
+	fprintf(f, "\nBQ\n");
+	int bl=0;
+	for (uint i=0;i<consensus_bq.Count();++i) {
+		if (bl) fprintf(f, " %d", consensus_bq[i]);
+		   else fprintf(f,  "%d", consensus_bq[i]);
+		++bl;
+		if (bl==60) {
+			fprintf(f,"\n");
+			bl=0;
+		}
+	}
+	if (bl) fprintf(f, "\n\n");
+	   else fprintf(f, "\n");
 	for (int i = 0; i < Count(); i++) {
 		GASeq* seq = Get(i);
 		//if (seq->hasFlag(7)) continue; -- checking the badalign flag..
@@ -1320,7 +1352,7 @@ void GSeqAlign::writeInfo(FILE* f, const char* name, bool refWeighDown) {
 //-- also compute this, just in case:
 // redundancy = sum(asm_rend-asm_lend+1)/contig_len
 //(and also the pid for each reads vs. consensus)
-	fprintf(f, ">%s %d %s\n", name, Count(), consensus);
+	fprintf(f, ">%s %d %s\n", name, Count(), consensus());
 	float redundancy = 0; // = sum(asm_rend-asm_lend+1)/contig_len
 	for (int i = 0; i < Count(); i++) {
 		GASeq* seq = Get(i);
@@ -1390,5 +1422,5 @@ void GSeqAlign::writeInfo(FILE* f, const char* name, bool refWeighDown) {
 		fprintf(f, "%s %d %d %d %d %d %d %4.2f %s\n", seq->id, seq->len, seqoffset,
 		    asml, asmr, seql, seqr, pid, alndata.chars());
 	}
-	redundancy /= (float) consensus_len;
+	redundancy /= (float) consensus.Count();
 }

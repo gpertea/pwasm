@@ -109,7 +109,7 @@ public:
   GASeq(const char* sname, const char* sdescr=NULL, const char* sseq=NULL, int slen=0, int soffset=0);
   GASeq(const char* sname, int soffset, int slen, int sclipL=0, int sclipR=0, char rev=0);
   ~GASeq();
-  void refineClipping(char* cons, int cons_len, int cpos, bool skipDels=false);
+  void refineClipping(GDynArray<char>& cons, int cpos, bool skipDels=false);
   void setGap(int pos, short gaplen=1); // set the gap in this pos
   void addGap(int pos, short gapadd); //extend the gap in this pos
   //bitno is 0 based here, for simplicity:
@@ -257,10 +257,10 @@ class AlnClipOps :public GList<SeqClipOp> {
 class GAlnColumn {
  protected:
    struct NucCount {
-     char c; // A, C, G, T, N or -
-             // precisely in this order!
+     char nt; // A, C, G, T, N or -
+             // precisely in this order (except after qsort)
      int count;
-     void set(char l, int num=0) { c=l;count=num; }
+     void set(char l, int num=0) { nt=l;count=num; }
      };
   enum { ncA=0, ncC, ncG, ncT, ncN, ncGap };
   NucCount counts[6];
@@ -273,27 +273,23 @@ class GAlnColumn {
   GList<NucOri>* nucs;
   friend int qsortnuc(const void* p1, const void* p2);
   //int total() { return numgaps+numN+numA()+numC()+numG()+numT(); }
-  GAlnColumn() {        //sorted?, free?, unique?
-   clipnuc=NULL;
+  GAlnColumn():countsSorted(false),hasClip(false), consensus(0),
+		  layers(0), clipnuc(NULL), nucs(NULL) {        //sorted?, free?, unique?
    nucs=new GList<NucOri>(false,true,false);
    /*lstC=new GList<NucOri>(false,true,false);
    lstG=new GList<NucOri>(false,true,false);
    lstT=new GList<NucOri>(false,true,false);*/
-   countsSorted=false;
    counts[ncA].set('A');
    counts[ncC].set('C');
    counts[ncG].set('G');
    counts[ncT].set('T');
    counts[ncN].set('N');
    counts[ncGap].set('-');
-   hasClip=false;
-   layers=0;
-   consensus=0;
-   }
+  }
   ~GAlnColumn() {
    delete nucs;
    if (clipnuc!=NULL) delete clipnuc;
-   }
+  }
   void addGap(int nucVal=1) { counts[ncGap].count+=nucVal;
                   layers++; //-- Not a "layer", actually
                   //numgaps++;
@@ -338,7 +334,7 @@ class GAlnColumn {
        }//switch
    }
 
-  char bestChar();
+  char bestChar(int16_t *qscore=NULL);
   void remove(); //removes a nucleotide from all involved sequences
                  //adjust all affected offsets in the alignment
 };
@@ -384,7 +380,7 @@ class GSeqAlign :public GList<GASeq> {
    //static unsigned int counter;
    int length;
    int minoffset;
-   int consensus_cap;
+   //int consensus_cap;
    void buildMSA(bool refWeighDown=false);
    void ErrZeroCov(int col);
  public:
@@ -395,8 +391,10 @@ class GSeqAlign :public GList<GASeq> {
    int ng_len;     //ungapped length and minoffset (approximative,
    int ng_minofs;  //  for clipping constraints only)
    int badseqs;
-   char* consensus; //consensus sequence (built by refineMSA())
-   int consensus_len;
+   //char* consensus; //consensus sequence (built by refineMSA())
+   GDynArray<char> consensus;
+   GDynArray<int16_t> consensus_bq;
+   //int consensus_len;
    friend class GASeq;
    bool operator==(GSeqAlign& d){
      return (this==&d);
@@ -410,14 +408,14 @@ class GSeqAlign :public GList<GASeq> {
   //--
   //GSeqAlign():GList<GASeq>(true,true,false), length(0), minoffset(0),
   GSeqAlign():GList<GASeq>(false,true,false), length(0), minoffset(0),
-  		consensus_cap(0), refinedMSA(false), msacolumns(NULL), ordnum(0),
-  		ng_len(0),ng_minofs(0), badseqs(0), consensus(NULL), consensus_len(0) {
+  		refinedMSA(false), msacolumns(NULL), ordnum(0),
+  		ng_len(0),ng_minofs(0), badseqs(0), consensus(512), consensus_bq(512) {
     //default is: sorted by GASeq offset, free nodes, non-unique
     }
   GSeqAlign(bool sorted, bool free_elements=true, bool beUnique=false)
      :GList<GASeq>(sorted,free_elements,beUnique), length(0), minoffset(0),
-  		consensus_cap(0), refinedMSA(false), msacolumns(NULL), ordnum(0),
-  		ng_len(0),ng_minofs(0), badseqs(0), consensus(NULL), consensus_len(0) {
+  		refinedMSA(false), msacolumns(NULL), ordnum(0),
+  		ng_len(0),ng_minofs(0), badseqs(0), consensus(512), consensus_bq(512) {
     }
   //void incOrd() { ordnum = ++counter; }
   void incOrd() { ordnum++; }
@@ -429,7 +427,6 @@ class GSeqAlign :public GList<GASeq> {
   #endif
   ~GSeqAlign() {
     if (msacolumns!=NULL) delete msacolumns;
-    if (consensus!=NULL) GFREE(consensus);
     }
   int len() { return length; }
 
@@ -437,7 +434,7 @@ class GSeqAlign :public GList<GASeq> {
   void addSeq(GASeq* s, int soffs, int ngofs);
   void injectGap(GASeq* seq, int pos, int xgap);
   void removeBase(GASeq* seq, int pos);
-  void extendConsensus(char c);
+  void extendConsensus(char c, int16_t bq=SHRT_MIN);
   //try to propagate the planned trimming of a read
   //to the whole MSA containing it
   // returns false if too much is trimmed of any component read
