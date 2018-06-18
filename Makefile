@@ -59,7 +59,7 @@ endif
 	${CC} ${CFLAGS} -c $< -o $@
 
 OBJS := ${GDIR}/GBase.o ${GDIR}/GStr.o ${GDIR}/GArgs.o ${GDIR}/gdna.o \
-  ${GDIR}/GFastaIndex.o ${GDIR}/GFaSeqGet.o ./GapAssem.o
+ ${GDIR}/codons.o ${GDIR}/GFastaIndex.o ${GDIR}/GFaSeqGet.o ${GDIR}/GapAssem.o
 
 #ifndef NOTHREADS
 # OBJS += ${GDIR}/GThreads.o 
@@ -78,10 +78,10 @@ memcheck : all
 memdebug : all 
 static : all
 
-pafreport :  ./pafreport.o ${OBJS} ${GDIR}/codons.o
+pafreport :  ./pafreport.o ${OBJS}
 	${LINKER} ${LDFLAGS} -o $@ ${filter-out %.a %.so, $^} ${LIBS}
 
-#./GapAssem.o: GapAssem.h
+${GDIR}/GapAssem.o: ${GDIR}/GapAssem.h
 
 # target for removing all object files
 
