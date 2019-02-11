@@ -172,7 +172,7 @@ char* endSpToken(char* str) {
 //========================================================
 //====================     main      =====================
 //========================================================
-int main(int argc, char * const argv[]) {
+int main(int argc, char* argv[]) {
  //GArgs args(argc, argv, "DGvd:o:c:");
  GArgs args(argc, argv, "DGFCNvd:p:r:o:m:w:c:s:");
  int e;
